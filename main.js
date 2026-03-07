@@ -79,3 +79,13 @@ registerIpcHandlers(['code-config-hub:reveal-file', 'config-manager:reveal-file'
   shell.showItemInFolder(filePath);
   return { ok: true };
 });
+
+registerIpcHandlers(['code-config-hub:get-version', 'config-manager:get-version'], async () => {
+  return app.getVersion();
+});
+
+registerIpcHandlers(['code-config-hub:open-external', 'config-manager:open-external'], async (_event, url) => {
+  if (url) {
+    shell.openExternal(url);
+  }
+});

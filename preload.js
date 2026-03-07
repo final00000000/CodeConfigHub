@@ -32,6 +32,12 @@ const desktopApi = {
   },
   revealFile(filePath) {
     return invokeWithFallback('code-config-hub:reveal-file', 'config-manager:reveal-file', filePath);
+  },
+  getVersion() {
+    return invokeWithFallback('code-config-hub:get-version', 'config-manager:get-version');
+  },
+  openExternal(url) {
+    return invokeWithFallback('code-config-hub:open-external', 'config-manager:open-external', url);
   }
 };
 

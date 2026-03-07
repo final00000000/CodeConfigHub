@@ -27,6 +27,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTopbarActions();
   bindSplitter();
   await discoverConfigs();
+  await checkForUpdates();
 });
 
 function cacheElements() {
@@ -456,6 +457,69 @@ async function saveCurrentEntry() {
     });
   }
 }
+
+async function checkForUpdates() {
+  const container = document.getElementById('update-strip');
+  if (!container) return;
+
+  try {
+    const currentVersion = await getDesktopApi().getVersion();
+    const response = await fetch('https://api.github.com/repos/final00000000/CodeConfigHub/releases/latest');
+
+    if (!response.ok) {
+      throw new Error(`GitHub API Error: ${response.status}`);
+    }
+
+    const latest = await response.json();
+    const latestTag = latest.tag_name || 'v0.0.0';
+    const latestVersion = latestTag.replace(/^v/, '');
+
+    const compareVersions = (v1, v2) => {
+      const parts1 = String(v1).split('.').map(v => parseInt(v, 10) || 0);
+      const parts2 = String(v2).split('.').map(v => parseInt(v, 10) || 0);
+      for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
+        if ((parts1[i] || 0) > (parts2[i] || 0)) return 1;
+        if ((parts1[i] || 0) < (parts2[i] || 0)) return -1;
+      }
+      return 0;
+    };
+
+    const isNew = compareVersions(latestVersion, currentVersion) > 0;
+
+    if (isNew) {
+      container.innerHTML = `
+        <div class="update-status update-status--new">
+          <span class="dot"></span>
+          <span>发现新版本 ${escapeHtml(latestTag)}</span>
+        </div>
+        <div class="update-actions">
+          <button class="update-btn-mini update-btn-mini--primary" onclick="getDesktopApi().openExternal('${escapeHtml(latest.html_url)}')">立即下载</button>
+          <button class="update-btn-mini" onclick="this.parentElement.parentElement.style.display='none'">忽略</button>
+        </div>
+      `;
+    } else {
+      container.innerHTML = `
+        <div class="update-status">
+          <span class="dot"></span>
+          <span>已是最新版本 (${escapeHtml(currentVersion)})</span>
+        </div>
+      `;
+    }
+  } catch (error) {
+    console.warn('Update check failed:', error);
+    getDesktopApi().getVersion().then(v => {
+      container.innerHTML = `
+        <div class="update-status">
+          <span class="dot"></span>
+          <span>当前版本 ${escapeHtml(v)}</span>
+        </div>
+      `;
+    }).catch(() => {
+      container.innerHTML = '';
+    });
+  }
+}
+
 
 
 

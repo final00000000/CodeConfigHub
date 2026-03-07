@@ -65,6 +65,13 @@ export function renderSidebar(container, { entries, projectPath, selectedId, onS
 
       ${renderGroup('Codex CLI', 'codex', codexEntries, selectedId)}
       ${renderGroup('Claude Code', 'claude', claudeEntries, selectedId)}
+
+      <div id="update-strip" class="update-strip">
+        <div class="update-status">
+          <span class="dot"></span>
+          <span>正在检查更新...</span>
+        </div>
+      </div>
     </div>
   `;
 
