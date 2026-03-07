@@ -27,8 +27,71 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTopbarActions();
   bindSplitter();
   await discoverConfigs();
-  await checkForUpdates();
+
+  // Initialize update listener ONCE
+  initUpdateListener();
+
+  // Auto check on start (silent)
+  checkForUpdates(false);
 });
+
+function initUpdateListener() {
+  const api = getDesktopApi();
+  const modalRoot = document.getElementById('update-modal-root');
+  if (!api || !modalRoot) return;
+
+  const showModal = (content) => {
+    modalRoot.innerHTML = `<div class="update-modal">${content}</div>`;
+    modalRoot.classList.add('is-visible');
+  };
+
+  api.onUpdateStatus(async (channel, data) => {
+    // Global handling for update events
+    switch (channel) {
+      case 'update:available':
+        showModal(`
+          <h2>✨ 发现新版本</h2>
+          <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布。是否立即更新？</p>
+          <div class="update-modal-actions">
+            <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
+            <button class="primary-button" onclick="getDesktopApi().downloadUpdate()">立即更新</button>
+          </div>
+        `);
+        break;
+
+      case 'update:not-available':
+        // Silently handled by manual flag logic in checkForUpdates if needed
+        break;
+
+      case 'update:download-progress':
+        const percent = Math.floor(data.percent || 0);
+        showModal(`
+          <h2>🚀 正在下载更新</h2>
+          <p>请稍候，我们正在为你准备最新版本的组件...</p>
+          <div class="update-progress-container">
+            <div class="update-progress-bar" style="width: ${percent}%"></div>
+          </div>
+          <p style="text-align: right; font-size: 0.85rem;">${percent}%</p>
+        `);
+        break;
+
+      case 'update:downloaded':
+        showModal(`
+          <h2>🎉 更新已就绪</h2>
+          <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
+          <div class="update-modal-actions">
+            <button class="primary-button" onclick="getDesktopApi().installUpdate()">立即重启并安装</button>
+          </div>
+        `);
+        break;
+
+      case 'update:error':
+        console.warn('Updater Error:', data);
+        break;
+    }
+  });
+}
+
 
 function cacheElements() {
   elements.sidebar = document.getElementById('sidebar');
@@ -47,7 +110,7 @@ function cacheElements() {
 }
 
 function restoreTheme() {
-  const saved = localStorage.getItem('ai-config-theme') || 'dark';
+  const saved = localStorage.getItem('ai-config-theme') || 'light';
   document.documentElement.setAttribute('data-theme', saved);
   elements.themeButton.textContent = saved === 'light' ? '\u{1F319}' : '\u{1F31E}';
   elements.themeButton.title = saved === 'light' ? '\u5207\u6362\u5230\u6697\u9ED1\u4E3B\u9898' : '\u5207\u6362\u5230\u660E\u4EAE\u4E3B\u9898';
@@ -59,8 +122,8 @@ function bindTopbarActions() {
     const newTheme = isLight ? 'dark' : 'light';
     document.documentElement.setAttribute('data-theme', newTheme);
     localStorage.setItem('ai-config-theme', newTheme);
-    elements.themeButton.title = isLight ? '\u5207\u6362\u5230\u660E\u4EAE\u4E3B\u9898' : '\u5207\u6362\u5230\u6697\u9ED1\u4E3B\u9898';
-    elements.themeButton.textContent = isLight ? '\u{1F31E}' : '\u{1F319}';
+    elements.themeButton.title = newTheme === 'light' ? '\u5207\u6362\u5230\u6697\u9ED1\u4E3B\u9898' : '\u5207\u6362\u5230\u660E\u4EAE\u4E3B\u9898';
+    elements.themeButton.textContent = newTheme === 'light' ? '\u{1F319}' : '\u{1F31E}';
   };
 
   elements.chooseProjectButton.onclick = async () => {
@@ -99,15 +162,20 @@ function bindTopbarActions() {
     await getDesktopApi().revealFile(entry.path);
   };
 
-  const checkUpdateBtn = document.getElementById('check-update-btn');
-  if (checkUpdateBtn) {
-    checkUpdateBtn.onclick = async () => {
-      checkUpdateBtn.classList.add('is-loading');
-      showToast({ title: '检查更新', message: '正在联系服务器...' });
+  // Use event delegation for dynamically-created sidebar buttons
+  elements.sidebar.addEventListener('click', async (e) => {
+    const btn = e.target.closest('#check-update-btn');
+    if (!btn) return;
+
+    try {
+      btn.classList.add('is-loading');
       await checkForUpdates(true);
-      checkUpdateBtn.classList.remove('is-loading');
-    };
-  }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      btn.classList.remove('is-loading');
+    }
+  });
 }
 
 function bindSplitter() {
@@ -469,78 +537,57 @@ async function saveCurrentEntry() {
 }
 
 async function checkForUpdates(isManual = false) {
-  const modalRoot = document.getElementById('update-modal-root');
-  if (!modalRoot) return;
-
   const api = getDesktopApi();
+  const currentVersion = await api.getVersion();
+  const modalRoot = document.getElementById('update-modal-root');
 
-  const showModal = (content) => {
-    modalRoot.innerHTML = `
-      <div class="update-modal">
-        ${content}
-      </div>
-    `;
+  const showUpdateModal = (content) => {
+    if (!modalRoot) return;
+    modalRoot.innerHTML = `<div class="update-modal">${content}</div>`;
     modalRoot.classList.add('is-visible');
   };
 
-  const closeModal = () => {
-    modalRoot.classList.remove('is-visible');
-  };
-
-  const currentVersion = await api.getVersion();
-
-  api.onUpdateStatus((channel, data) => {
-    switch (channel) {
-      case 'update:available':
-        showModal(`
-          <h2>✨ 发现新版本</h2>
-          <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布，包含了最新的优化与修复。是否立即更新？</p>
-          <div class="update-modal-actions">
-            <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
-            <button class="primary-button" onclick="getDesktopApi().downloadUpdate()">立即更新</button>
-          </div>
-        `);
-        break;
-
-      case 'update:not-available':
-        if (isManual) {
-          showToast({ title: '已是最新', message: `当前版本 (${currentVersion}) 已经是最新发布状态。` });
-        }
-        break;
-
-      case 'update:download-progress':
-        const percent = Math.floor(data.percent || 0);
-        showModal(`
-          <h2>🚀 正在下载更新</h2>
-          <p>请稍候，我们正在为你准备最新版本的组件...</p>
-          <div class="update-progress-container">
-            <div class="update-progress-bar" style="width: ${percent}%"></div>
-          </div>
-          <p style="text-align: right; font-size: 0.85rem;">${percent}%</p>
-        `);
-        break;
-
-      case 'update:downloaded':
-        showModal(`
-          <h2>🎉 更新已就绪</h2>
-          <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
-          <div class="update-modal-actions">
-            <button class="primary-button" onclick="getDesktopApi().installUpdate()">立即重启并安装</button>
-          </div>
-        `);
-        break;
-
-      case 'update:error':
-        console.warn('Updater Error:', data);
-        // Silently fail or show a minor toast if it was a foreground action
-        break;
-    }
-  });
-
   try {
-    await api.checkUpdate();
+    const response = await fetch('https://api.github.com/repos/final00000000/CodeConfigHub/releases/latest');
+
+    if (!response.ok) {
+      throw new Error(`GitHub API ${response.status}`);
+    }
+
+    const release = await response.json();
+    const latestTag = release.tag_name || 'v0.0.0';
+    const latestVersion = latestTag.replace(/^v/, '');
+
+    const compare = (a, b) => {
+      const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+      const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        if ((pa[i] || 0) > (pb[i] || 0)) return 1;
+        if ((pa[i] || 0) < (pb[i] || 0)) return -1;
+      }
+      return 0;
+    };
+
+    if (compare(latestVersion, currentVersion) > 0) {
+      // New version found - show modal
+      showUpdateModal(`
+        <h2>✨ 发现新版本</h2>
+        <p>CodeConfigHub ${escapeHtml(latestTag)} 已经发布，包含了最新的优化与修复。<br>当前版本：${escapeHtml(currentVersion)}</p>
+        <div class="update-modal-actions">
+          <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
+          <button class="primary-button" onclick="window.codeConfigHubAPI.openExternal('${escapeHtml(release.html_url)}')">前往下载</button>
+        </div>
+      `);
+    } else {
+      if (isManual) {
+        showToast({ title: '✅ 已是最新', message: `当前版本 (${currentVersion}) 已是最新发布状态。`, tone: 'success' });
+      }
+    }
   } catch (err) {
-    console.warn('Update check trigger failed:', err);
+    console.warn('Update check failed:', err);
+    if (isManual) {
+      showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
+    }
   }
 }
 

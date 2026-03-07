@@ -13,7 +13,7 @@ function createWindow() {
     minWidth: 1180,
     minHeight: 760,
     title: 'CodeConfigHub',
-    backgroundColor: '#09111a',
+    backgroundColor: '#ffffff', // Set white background for avoid flash during light mode start
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -23,7 +23,7 @@ function createWindow() {
     }
   });
 
-  mainWindow.setMenuBarVisibility(false);
+  mainWindow.removeMenu(); // More aggressive than setMenuBarVisibility
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
 }
 
