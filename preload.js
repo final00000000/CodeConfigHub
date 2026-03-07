@@ -38,6 +38,22 @@ const desktopApi = {
   },
   openExternal(url) {
     return invokeWithFallback('code-config-hub:open-external', 'config-manager:open-external', url);
+  },
+  // Update methods
+  checkUpdate() {
+    return ipcRenderer.invoke('update:check');
+  },
+  downloadUpdate() {
+    return ipcRenderer.invoke('update:download');
+  },
+  installUpdate() {
+    return ipcRenderer.invoke('update:install-and-restart');
+  },
+  onUpdateStatus(callback) {
+    const channels = ['update:available', 'update:not-available', 'update:download-progress', 'update:downloaded', 'update:error'];
+    channels.forEach(channel => {
+      ipcRenderer.on(channel, (event, data) => callback(channel, data));
+    });
   }
 };
 

@@ -98,6 +98,14 @@ function bindTopbarActions() {
 
     await getDesktopApi().revealFile(entry.path);
   };
+
+  const checkUpdateBtn = document.getElementById('check-update-btn');
+  if (checkUpdateBtn) {
+    checkUpdateBtn.onclick = () => {
+      showToast({ title: '检查更新', message: '正在联系服务器...' });
+      checkForUpdates(true);
+    };
+  }
 }
 
 function bindSplitter() {
@@ -458,65 +466,79 @@ async function saveCurrentEntry() {
   }
 }
 
-async function checkForUpdates() {
-  const container = document.getElementById('update-strip');
-  if (!container) return;
+async function checkForUpdates(isManual = false) {
+  const modalRoot = document.getElementById('update-modal-root');
+  if (!modalRoot) return;
+
+  const api = getDesktopApi();
+
+  const showModal = (content) => {
+    modalRoot.innerHTML = `
+      <div class="update-modal">
+        ${content}
+      </div>
+    `;
+    modalRoot.classList.add('is-visible');
+  };
+
+  const closeModal = () => {
+    modalRoot.classList.remove('is-visible');
+  };
+
+  const currentVersion = await api.getVersion();
+
+  api.onUpdateStatus((channel, data) => {
+    switch (channel) {
+      case 'update:available':
+        showModal(`
+          <h2>✨ 发现新版本</h2>
+          <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布，包含了最新的优化与修复。是否立即更新？</p>
+          <div class="update-modal-actions">
+            <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
+            <button class="primary-button" onclick="getDesktopApi().downloadUpdate()">立即更新</button>
+          </div>
+        `);
+        break;
+
+      case 'update:not-available':
+        if (isManual) {
+          showToast({ title: '已是最新', message: `当前版本 (${currentVersion}) 已经是最新发布状态。` });
+        }
+        break;
+
+      case 'update:download-progress':
+        const percent = Math.floor(data.percent || 0);
+        showModal(`
+          <h2>🚀 正在下载更新</h2>
+          <p>请稍候，我们正在为你准备最新版本的组件...</p>
+          <div class="update-progress-container">
+            <div class="update-progress-bar" style="width: ${percent}%"></div>
+          </div>
+          <p style="text-align: right; font-size: 0.85rem;">${percent}%</p>
+        `);
+        break;
+
+      case 'update:downloaded':
+        showModal(`
+          <h2>🎉 更新已就绪</h2>
+          <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
+          <div class="update-modal-actions">
+            <button class="primary-button" onclick="getDesktopApi().installUpdate()">立即重启并安装</button>
+          </div>
+        `);
+        break;
+
+      case 'update:error':
+        console.warn('Updater Error:', data);
+        // Silently fail or show a minor toast if it was a foreground action
+        break;
+    }
+  });
 
   try {
-    const currentVersion = await getDesktopApi().getVersion();
-    const response = await fetch('https://api.github.com/repos/final00000000/CodeConfigHub/releases/latest');
-
-    if (!response.ok) {
-      throw new Error(`GitHub API Error: ${response.status}`);
-    }
-
-    const latest = await response.json();
-    const latestTag = latest.tag_name || 'v0.0.0';
-    const latestVersion = latestTag.replace(/^v/, '');
-
-    const compareVersions = (v1, v2) => {
-      const parts1 = String(v1).split('.').map(v => parseInt(v, 10) || 0);
-      const parts2 = String(v2).split('.').map(v => parseInt(v, 10) || 0);
-      for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-        if ((parts1[i] || 0) > (parts2[i] || 0)) return 1;
-        if ((parts1[i] || 0) < (parts2[i] || 0)) return -1;
-      }
-      return 0;
-    };
-
-    const isNew = compareVersions(latestVersion, currentVersion) > 0;
-
-    if (isNew) {
-      container.innerHTML = `
-        <div class="update-status update-status--new">
-          <span class="dot"></span>
-          <span>发现新版本 ${escapeHtml(latestTag)}</span>
-        </div>
-        <div class="update-actions">
-          <button class="update-btn-mini update-btn-mini--primary" onclick="getDesktopApi().openExternal('${escapeHtml(latest.html_url)}')">立即下载</button>
-          <button class="update-btn-mini" onclick="this.parentElement.parentElement.style.display='none'">忽略</button>
-        </div>
-      `;
-    } else {
-      container.innerHTML = `
-        <div class="update-status">
-          <span class="dot"></span>
-          <span>已是最新版本 (${escapeHtml(currentVersion)})</span>
-        </div>
-      `;
-    }
-  } catch (error) {
-    console.warn('Update check failed:', error);
-    getDesktopApi().getVersion().then(v => {
-      container.innerHTML = `
-        <div class="update-status">
-          <span class="dot"></span>
-          <span>当前版本 ${escapeHtml(v)}</span>
-        </div>
-      `;
-    }).catch(() => {
-      container.innerHTML = '';
-    });
+    await api.checkUpdate();
+  } catch (err) {
+    console.warn('Update check trigger failed:', err);
   }
 }
 

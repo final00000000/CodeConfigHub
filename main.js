@@ -1,10 +1,13 @@
 const path = require('path');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require('electron');
+const { autoUpdater } = require('electron-updater');
 const { discoverConfigFiles } = require('./src/services/config-discovery');
 const { saveConfigDocument } = require('./src/services/file-service');
 
+let mainWindow;
+
 function createWindow() {
-  const mainWindow = new BrowserWindow({
+  mainWindow = new BrowserWindow({
     width: 1520,
     height: 960,
     minWidth: 1180,
@@ -89,3 +92,40 @@ registerIpcHandlers(['code-config-hub:open-external', 'config-manager:open-exter
     shell.openExternal(url);
   }
 });
+
+// --- Auto Updater Logic ---
+
+autoUpdater.autoDownload = false; // We want manual trigger from UI
+
+autoUpdater.on('update-available', (info) => {
+  mainWindow.webContents.send('update:available', info);
+});
+
+autoUpdater.on('update-not-available', (info) => {
+  mainWindow.webContents.send('update:not-available', info);
+});
+
+autoUpdater.on('download-progress', (progress) => {
+  mainWindow.webContents.send('update:download-progress', progress);
+});
+
+autoUpdater.on('update-downloaded', (info) => {
+  mainWindow.webContents.send('update:downloaded', info);
+});
+
+autoUpdater.on('error', (err) => {
+  mainWindow.webContents.send('update:error', err.message);
+});
+
+registerIpcHandlers(['update:check'], async () => {
+  return autoUpdater.checkForUpdates();
+});
+
+registerIpcHandlers(['update:download'], async () => {
+  return autoUpdater.downloadUpdate();
+});
+
+registerIpcHandlers(['update:install-and-restart'], async () => {
+  autoUpdater.quitAndInstall();
+});
+
