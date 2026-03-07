@@ -1,0 +1,42 @@
+{
+  "name": "code-config-hub",
+  "version": "0.1.0",
+  "description": "Desktop visual editor for Codex CLI and Claude Code configuration files.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "package:win": "electron-builder --win nsis",
+    "package:mac": "electron-builder --mac dmg"
+  },
+  "keywords": [
+    "electron",
+    "codex",
+    "claude",
+    "config-editor"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "smol-toml": "^1.4.2"
+  },
+  "devDependencies": {
+    "electron": "^40.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.desktop.codeconfighub",
+    "productName": "CodeConfigHub",
+    "files": [
+      "main.js",
+      "preload.js",
+      "package.json",
+      "src/**/*",
+      "build/**/*"
+    ],
+    "directories": {
+      "buildResources": "build"
+    }
+  }
+}
+
