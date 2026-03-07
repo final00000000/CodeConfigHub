@@ -42,7 +42,6 @@ export function renderSidebar(container, { entries, projectPath, selectedId, onS
   container.innerHTML = `
     <div class="sidebar-shell">
       <div class="brand-block">
-        <p class="brand-kicker">第一阶段版本</p>
         <h1>CodeConfigHub</h1>
         <p class="brand-copy">为 Codex CLI 与 Claude Code 提供一套桌面级、可视化、带实时预览的配置工作台。</p>
       </div>

@@ -101,9 +101,11 @@ function bindTopbarActions() {
 
   const checkUpdateBtn = document.getElementById('check-update-btn');
   if (checkUpdateBtn) {
-    checkUpdateBtn.onclick = () => {
+    checkUpdateBtn.onclick = async () => {
+      checkUpdateBtn.classList.add('is-loading');
       showToast({ title: '检查更新', message: '正在联系服务器...' });
-      checkForUpdates(true);
+      await checkForUpdates(true);
+      checkUpdateBtn.classList.remove('is-loading');
     };
   }
 }
