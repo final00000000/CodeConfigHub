@@ -60,7 +60,10 @@ function initUpdateListener() {
         break;
 
       case 'update:not-available':
-        // Silently handled by manual flag logic in checkForUpdates if needed
+        if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
+          showToast({ title: '✅ 已是最新', message: '当前应用已是最新发布状态。', tone: 'success' });
+          isManualUpdateCheck = false; // reset
+        }
         break;
 
       case 'update:download-progress':
@@ -87,6 +90,10 @@ function initUpdateListener() {
 
       case 'update:error':
         console.warn('Updater Error:', data);
+        if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
+          showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
+          isManualUpdateCheck = false; // reset
+        }
         break;
     }
   });
@@ -536,60 +543,23 @@ async function saveCurrentEntry() {
   }
 }
 
+let isManualUpdateCheck = false;
+
 async function checkForUpdates(isManual = false) {
   const api = getDesktopApi();
-  const currentVersion = await api.getVersion();
-  const modalRoot = document.getElementById('update-modal-root');
+  if (!api || !api.checkUpdate) return;
 
-  const showUpdateModal = (content) => {
-    if (!modalRoot) return;
-    modalRoot.innerHTML = `<div class="update-modal">${content}</div>`;
-    modalRoot.classList.add('is-visible');
-  };
-
+  isManualUpdateCheck = isManual;
   try {
-    const response = await fetch('https://api.github.com/repos/final00000000/CodeConfigHub/releases/latest');
-
-    if (!response.ok) {
-      throw new Error(`GitHub API ${response.status}`);
-    }
-
-    const release = await response.json();
-    const latestTag = release.tag_name || 'v0.0.0';
-    const latestVersion = latestTag.replace(/^v/, '');
-
-    const compare = (a, b) => {
-      const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
-      const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
-      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        if ((pa[i] || 0) > (pb[i] || 0)) return 1;
-        if ((pa[i] || 0) < (pb[i] || 0)) return -1;
-      }
-      return 0;
-    };
-
-    if (compare(latestVersion, currentVersion) > 0) {
-      // New version found - show modal
-      showUpdateModal(`
-        <h2>✨ 发现新版本</h2>
-        <p>CodeConfigHub ${escapeHtml(latestTag)} 已经发布，包含了最新的优化与修复。<br>当前版本：${escapeHtml(currentVersion)}</p>
-        <div class="update-modal-actions">
-          <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
-          <button class="primary-button" onclick="window.codeConfigHubAPI.openExternal('${escapeHtml(release.html_url)}')">前往下载</button>
-        </div>
-      `);
-    } else {
-      if (isManual) {
-        showToast({ title: '✅ 已是最新', message: `当前版本 (${currentVersion}) 已是最新发布状态。`, tone: 'success' });
-      }
-    }
+    await api.checkUpdate();
   } catch (err) {
     console.warn('Update check failed:', err);
-    if (isManual) {
+    if (isManualUpdateCheck) {
       showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
     }
   }
 }
+
 
 
 
