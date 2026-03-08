@@ -1,11 +1,14 @@
-!macro customInit
-  ; 确保默认安装路径包含应用子文件夹
-  ${If} $INSTDIR == ""
-    StrCpy $INSTDIR "$LOCALAPPDATA\Programs\${PRODUCT_NAME}"
-  ${EndIf}
+!include "FileFunc.nsh"
+!include "LogicLib.nsh"
+!insertmacro GetFileName
+
+!macro customHeader
+  !define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirectoryLeave
 !macroend
 
-!macro customInstall
-  ; 安装完成后创建开始菜单快捷方式的目录
-  CreateDirectory "$INSTDIR"
-!macroend
+Function DirectoryLeave
+  ${GetFileName} "$INSTDIR" $R0
+  ${If} $R0 != "${PRODUCT_NAME}"
+    StrCpy $INSTDIR "$INSTDIR\${PRODUCT_NAME}"
+  ${EndIf}
+FunctionEnd
