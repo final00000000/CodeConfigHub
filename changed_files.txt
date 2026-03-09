@@ -1,0 +1,3 @@
+build/installer.nsh
+package.json
+src/index.css

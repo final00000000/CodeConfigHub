@@ -6,7 +6,16 @@
 !macroend
 
 !macro customInit
-  ; Force app subfolder in installation path
+  ; Set default installation directory with app subfolder
+  StrCpy $INSTDIR "$PROGRAMFILES64\CodeConfigHub"
+!macroend
+
+; Page callback to ensure path always includes app subfolder
+!macro customInstallPage
+  !define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirectoryLeave
+!macroend
+
+Function DirectoryLeave
   ; Check if path ends with \CodeConfigHub
   StrLen $0 "$INSTDIR"
   IntOp $0 $0 - 15  ; Length of "\CodeConfigHub"
@@ -18,4 +27,4 @@
   ${Else}
     StrCpy $INSTDIR "$INSTDIR\CodeConfigHub"
   ${EndIf}
-!macroend
+FunctionEnd
