@@ -1,6 +1,6 @@
 {
   "name": "code-config-hub",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Desktop visual editor for Codex CLI and Claude Code configuration files.",
   "repository": {
     "type": "git",
@@ -34,7 +34,8 @@
     "productName": "CodeConfigHub",
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     },
     "files": [
       "main.js",
