@@ -2,6 +2,7 @@ const path = require('path');
 const { app, BrowserWindow, clipboard, dialog, ipcMain, shell } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const { discoverConfigFiles } = require('./src/services/config-discovery');
+const { getCodexOfficialSchema } = require('./src/services/codex-schema-service');
 const { saveConfigDocument } = require('./src/services/file-service');
 
 let mainWindow;
@@ -19,17 +20,34 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
 
   mainWindow.removeMenu(); // More aggressive than setMenuBarVisibility
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!String(url || '').startsWith('file://')) {
+      event.preventDefault();
+    }
+  });
   mainWindow.loadFile(path.join(__dirname, 'src', 'index.html'));
+}
+
+function isTrustedIpcEvent(event) {
+  const senderUrl = event?.senderFrame?.url || event?.sender?.getURL?.() || '';
+  return Boolean(mainWindow) && event?.sender === mainWindow.webContents && senderUrl.startsWith('file://');
 }
 
 function registerIpcHandlers(channels, listener) {
   for (const channel of channels) {
-    ipcMain.handle(channel, listener);
+    ipcMain.handle(channel, async (event, ...args) => {
+      if (!isTrustedIpcEvent(event)) {
+        throw new Error('Blocked unauthorized IPC sender.');
+      }
+
+      return listener(event, ...args);
+    });
   }
 }
 
@@ -51,6 +69,10 @@ app.on('window-all-closed', () => {
 
 registerIpcHandlers(['code-config-hub:discover', 'config-manager:discover'], async (_event, projectPath) => {
   return discoverConfigFiles(projectPath);
+});
+
+registerIpcHandlers(['code-config-hub:get-codex-schema', 'config-manager:get-codex-schema'], async (_event, forceRefresh) => {
+  return getCodexOfficialSchema({ forceRefresh: Boolean(forceRefresh) });
 });
 
 registerIpcHandlers(['code-config-hub:choose-project', 'config-manager:choose-project'], async () => {
@@ -89,9 +111,23 @@ registerIpcHandlers(['code-config-hub:get-version', 'config-manager:get-version'
 });
 
 registerIpcHandlers(['code-config-hub:open-external', 'config-manager:open-external'], async (_event, url) => {
-  if (url) {
-    shell.openExternal(url);
+  if (!url) {
+    return { ok: false, reason: 'empty-url' };
   }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return { ok: false, reason: 'invalid-url' };
+  }
+
+  if (parsedUrl.protocol !== 'https:') {
+    return { ok: false, reason: 'unsupported-protocol' };
+  }
+
+  await shell.openExternal(parsedUrl.toString());
+  return { ok: true };
 });
 
 // --- Auto Updater Logic ---

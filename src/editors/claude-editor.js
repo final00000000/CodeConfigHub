@@ -79,6 +79,25 @@ function createMcpServerDraft() {
   };
 }
 
+function isFilledValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function hasKeyValueRowsData(rows = []) {
+  return rows.some((row) => isFilledValue(row?.key) || isFilledValue(row?.value));
+}
+
+function hasHookData(hook = {}) {
+  return isFilledValue(hook.matcher) || isFilledValue(hook.value);
+}
+
+function hasMcpServerData(server = {}) {
+  return isFilledValue(server.name)
+    || isFilledValue(server.command)
+    || isFilledValue(server.args)
+    || hasKeyValueRowsData(server.envRows);
+}
+
 
 
 export function createClaudeDraft(parsed = {}) {
@@ -392,7 +411,7 @@ function renderMcpServerCard(server, index) {
           <p>提供工具、资源或提示词的外部服务器。</p>
         </div>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <button class="mini-button" type="button" data-action="remove-mcp" data-index="${index}" onclick="event.stopPropagation();">移除</button>
+          <button class="mini-button" type="button" data-action="remove-mcp" data-index="${index}" data-stop-summary-toggle="true">移除</button>
           <svg style="width: 14px; height: 14px; fill: var(--text-dim);" class="summary-caret" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5H7z"/></svg>
         </div>
       </summary>
@@ -462,6 +481,12 @@ export function renderClaudeEditor(container, { entry, draft, onDraftChange }) {
       ${renderClaudeHooksSection(currentDraft)}
     </div>
   `;
+
+  container.querySelectorAll('[data-stop-summary-toggle="true"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+  });
 
   function commit({ rerender = false } = {}) {
     onDraftChange(clone(currentDraft));
@@ -542,6 +567,11 @@ export function renderClaudeEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-env-row') {
+      const row = currentDraft.envRows[index];
+      if (row && (isFilledValue(row.key) || isFilledValue(row.value)) && !window.confirm('确定要删除这条环境变量吗？')) {
+        return;
+      }
+
       currentDraft.envRows.splice(index, 1);
       if (currentDraft.envRows.length === 0) {
         currentDraft.envRows.push({ key: '', value: '' });
@@ -557,6 +587,11 @@ export function renderClaudeEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-hook') {
+      const hook = currentDraft.hooks[index];
+      if (hasHookData(hook) && !window.confirm('确定要删除这条 Hook 吗？')) {
+        return;
+      }
+
       currentDraft.hooks.splice(index, 1);
       commit({ rerender: true });
       return;
@@ -569,6 +604,12 @@ export function renderClaudeEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-mcp') {
+      const server = currentDraft.mcpServers[index];
+      const serverLabel = server?.name?.trim() ? `MCP 服务器「${server.name.trim()}」` : '该 MCP 服务器';
+      if (hasMcpServerData(server) && !window.confirm(`确定要删除${serverLabel}吗？`)) {
+        return;
+      }
+
       currentDraft.mcpServers.splice(index, 1);
       commit({ rerender: true });
       return;
@@ -582,6 +623,11 @@ export function renderClaudeEditor(container, { entry, draft, onDraftChange }) {
 
     if (action === 'remove-mcp-env-row') {
       const rowIndex = Number(button.getAttribute('data-row'));
+      const row = currentDraft.mcpServers[index].envRows[rowIndex];
+      if (row && (isFilledValue(row.key) || isFilledValue(row.value)) && !window.confirm('确定要删除这条环境变量吗？')) {
+        return;
+      }
+
       currentDraft.mcpServers[index].envRows.splice(rowIndex, 1);
       if (currentDraft.mcpServers[index].envRows.length === 0) {
         currentDraft.mcpServers[index].envRows.push({ key: '', value: '' });

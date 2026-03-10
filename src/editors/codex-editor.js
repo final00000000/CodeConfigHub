@@ -3,9 +3,11 @@ import {
   renderSegmented,
   renderSelect,
   renderTextInput,
+  renderTextArea,
   renderToggle,
   escapeHtml
 } from '../components/form-controls.js';
+import { applyDynamicFields, createCodexSchemaOverlay } from '../services/codex-schema-utils.js';
 
 const APPROVAL_OPTIONS = [
   { value: 'on-request', label: '按需申请', hint: '默认，需要时提权' },
@@ -17,7 +19,7 @@ const APPROVAL_OPTIONS = [
 const SANDBOX_OPTIONS = [
   { value: 'workspace-write', label: '工作区可写', hint: '日常开发' },
   { value: 'read-only', label: '只读', hint: '审查探索' },
-  { value: 'danger-full-access', label: '完全访问', hint: '可信环境' }
+  { value: 'danger-full-access', label: '完全访问', hint: '高风险，仅限完全可信环境' }
 ];
 
 const REASONING_OPTIONS = [
@@ -108,7 +110,7 @@ function createWebSearchMode(value) {
     return 'live';
   }
 
-  if (value === true) {
+  if (value === true || value === 'on' || value === 'true') {
     return 'on';
   }
 
@@ -124,20 +126,71 @@ function getEnabledFeatureCount(features) {
   return FEATURE_TOGGLES.filter(([key]) => features[key]).length;
 }
 
+function isFilledValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
 
+function hasKeyValueRowsData(rows = []) {
+  return rows.some((row) => isFilledValue(row?.key) || isFilledValue(row?.value));
+}
 
-function extractGlobally(obj, key) {
-  if (obj === null || typeof obj !== 'object') return undefined;
-  if (key in obj) return obj[key];
-  for (const v of Object.values(obj)) {
-    if (v === null || typeof v !== 'object') continue;
-    const found = extractGlobally(v, key);
-    if (found !== undefined) return found;
+function hasProviderData(provider = {}) {
+  return isFilledValue(provider.name)
+    || isFilledValue(provider.base_url)
+    || isFilledValue(provider.env_key)
+    || isFilledValue(provider.wire_api)
+    || Boolean(provider.requires_openai_auth)
+    || Boolean(provider.supports_websockets)
+    || hasKeyValueRowsData(provider.http_headers);
+}
+
+function hasProfileData(profile = {}) {
+  return isFilledValue(profile.name)
+    || isFilledValue(profile.model)
+    || isFilledValue(profile.model_provider)
+    || isFilledValue(profile.approval_policy)
+    || isFilledValue(profile.sandbox_mode);
+}
+
+function hasMcpServerData(server = {}) {
+  return isFilledValue(server.name)
+    || isFilledValue(server.command)
+    || isFilledValue(server.args)
+    || hasKeyValueRowsData(server.envRows);
+}
+
+function confirmDangerousSandboxSelection(scopeLabel = '当前配置') {
+  return window.confirm(`你正在为${scopeLabel}启用 danger-full-access。该模式会让 Agent 直接访问本机文件系统，仅建议在完全可信环境中使用。是否继续？`);
+}
+
+function getValueAtPath(root, pathValue) {
+  const pathParts = Array.isArray(pathValue) ? pathValue : String(pathValue).split('.').filter(Boolean);
+  let cursor = root;
+
+  for (const part of pathParts) {
+    if (!cursor || typeof cursor !== 'object' || !(part in cursor)) {
+      return undefined;
+    }
+
+    cursor = cursor[part];
   }
+
+  return cursor;
+}
+
+function getFirstDefinedValue(root, candidatePaths = []) {
+  for (const pathValue of candidatePaths) {
+    const value = getValueAtPath(root, pathValue);
+    if (value !== undefined) {
+      return value;
+    }
+  }
+
   return undefined;
 }
 
-export function createCodexDraft(parsed = {}) {
+export function createCodexDraft(parsed = {}, officialSchemaState = null) {
+  const schemaOverlay = createCodexSchemaOverlay(parsed, officialSchemaState);
   const providerEntries = Object.entries(parsed.model_providers || {}).map(([name, provider]) => ({
     name,
     base_url: provider.base_url || '',
@@ -163,8 +216,8 @@ export function createCodexDraft(parsed = {}) {
     approval_policy: parsed.approval_policy || 'on-request',
     sandbox_mode: parsed.sandbox_mode || 'workspace-write',
     web_search_mode: createWebSearchMode(parsed.web_search),
-    model_auto_compact_token_limit: extractGlobally(parsed, 'model_auto_compact_token_limit') ?? '',
-    model_context_window: extractGlobally(parsed, 'model_context_window') ?? '',
+    model_auto_compact_token_limit: getFirstDefinedValue(parsed, ['model_auto_compact_token_limit']) ?? '',
+    model_context_window: getFirstDefinedValue(parsed, ['model_context_window']) ?? '',
     max_threads: parsed.agents?.max_threads ?? parsed.max_threads ?? '',
     max_depth: parsed.agents?.max_depth ?? parsed.max_depth ?? '',
     features: FEATURE_TOGGLES.reduce((acc, [key]) => {
@@ -173,7 +226,10 @@ export function createCodexDraft(parsed = {}) {
     }, {}),
     providers: providerEntries.length > 0 ? providerEntries : [createEmptyProvider()],
     profiles: profileEntries,
-    mcpServers: parseMcpServers(parsed.mcp_servers)
+    mcpServers: parseMcpServers(parsed.mcp_servers),
+    dynamicFields: schemaOverlay.dynamicFields,
+    customFields: schemaOverlay.customFields,
+    officialSync: schemaOverlay.summary
   };
 }
 
@@ -282,15 +338,15 @@ export function serializeCodexDraft(baseConfig = {}, draft) {
   }
 
   // MCP Servers
+  const sourceMcpServers = isPlainObject(baseConfig.mcp_servers) ? baseConfig.mcp_servers : {};
   const nextMcpServers = {};
   for (const server of draft.mcpServers) {
     const serverName = server.name.trim();
     if (!serverName || !server.command.trim()) continue;
 
-    const serverConfig = {
-      command: server.command.trim(),
-      args: server.args.trim() ? server.args.trim().split(' ').filter(Boolean) : []
-    };
+    const serverConfig = clone(sourceMcpServers[serverName] || {});
+    serverConfig.command = server.command.trim();
+    serverConfig.args = server.args.trim() ? server.args.trim().split(' ').filter(Boolean) : [];
 
     const env = {};
     for (const row of server.envRows) {
@@ -306,6 +362,12 @@ export function serializeCodexDraft(baseConfig = {}, draft) {
   } else {
     delete output.mcp_servers;
   }
+
+  if (output.agents && Object.keys(output.agents).length === 0) {
+    delete output.agents;
+  }
+
+  applyDynamicFields(output, draft.dynamicFields || []);
 
   return {
     parsed: output,
@@ -576,6 +638,7 @@ function renderCodexOverviewSection(draft) {
     value: draft.sandbox_mode,
     options: SANDBOX_OPTIONS
   })}
+        ${draft.sandbox_mode === 'danger-full-access' ? '<div class="danger-note"><strong>危险权限提示：</strong> 当前已选择 <code>danger-full-access</code>，Agent 可以直接访问本机文件系统。仅在完全可信、无敏感数据暴露风险的环境中使用。</div>' : ''}
       </div>
     </section>
   `;
@@ -690,6 +753,149 @@ function renderCodexAdvancedSection(draft) {
   `;
 }
 
+function formatSchemaSourceLabel(summary) {
+  switch (summary?.source) {
+    case 'network':
+      return '官网最新';
+    case 'cache':
+      return '本地缓存';
+    case 'stale-cache':
+      return '缓存回退';
+    default:
+      return '未就绪';
+  }
+}
+
+function formatSchemaFetchedAt(value) {
+  if (!value) {
+    return '';
+  }
+
+  try {
+    return new Date(value).toLocaleString('zh-CN', { hour12: false });
+  } catch {
+    return value;
+  }
+}
+
+function renderDynamicField(field, index) {
+  const descriptionBits = [field.description, `配置路径：${field.actualPath}`].filter(Boolean);
+  const description = descriptionBits.join(' · ');
+
+  if (field.type === 'boolean') {
+    return renderSelect({
+      label: field.title,
+      name: `dynamic-field:${index}`,
+      value: field.inputValue,
+      description,
+      options: [
+        { value: '', label: '未设置 / 使用默认' },
+        { value: 'true', label: 'true' },
+        { value: 'false', label: 'false' }
+      ]
+    });
+  }
+
+  if (Array.isArray(field.enumValues) && field.enumValues.length > 0) {
+    return renderSelect({
+      label: field.title,
+      name: `dynamic-field:${index}`,
+      value: field.inputValue,
+      description,
+      options: [{ value: '', label: '未设置 / 使用默认' }, ...field.enumValues.map((option) => ({ value: String(option), label: String(option) }))]
+    });
+  }
+
+  if (field.type === 'array' || field.type === 'object') {
+    return renderTextArea({
+      label: field.title,
+      name: `dynamic-field:${index}`,
+      value: field.inputValue,
+      description: `${description} · 使用 JSON 编辑。`,
+      rows: 5,
+      span: 'full',
+      placeholder: field.type === 'array' ? '[]' : '{}'
+    });
+  }
+
+  return renderTextInput({
+    label: field.title,
+    name: `dynamic-field:${index}`,
+    value: field.inputValue,
+    description,
+    type: field.type === 'integer' || field.type === 'number' ? 'number' : 'text',
+    placeholder: field.defaultValue === undefined ? '留空表示未设置' : `默认：${field.defaultValue}`
+  });
+}
+
+function renderCodexSchemaSection(draft) {
+  const summary = draft.officialSync || {};
+  const statusTone = summary.available ? (summary.source === 'stale-cache' ? 'is-danger' : 'is-success') : 'is-muted';
+  const dynamicFields = draft.dynamicFields || [];
+  const customFields = draft.customFields || [];
+
+  return `
+    <section class="section-card">
+      ${renderSectionIntro({
+    eyebrow: 'Official Schema',
+    title: '官方参数同步',
+    description: summary.available
+      ? `已从官方 schema 识别 ${summary.totalOfficialCount} 个参数叶子节点，其中 ${summary.dynamicOfficialCount} 个属于自动发现字段。`
+      : '暂未加载到官方 schema，将继续显示当前内置字段。',
+    accent: 'neutral'
+  })}
+      <div class="stack-actions">
+        <span class="status-pill ${statusTone}">${escapeHtml(formatSchemaSourceLabel(summary))}</span>
+        ${summary.fetchedAt ? `<span class="status-pill is-muted">同步时间 ${escapeHtml(formatSchemaFetchedAt(summary.fetchedAt))}</span>` : ''}
+        <button class="secondary-button" type="button" data-action="refresh-official-schema">刷新官方参数</button>
+      </div>
+      ${summary.error ? `<div class="schema-note">本次刷新未能直接拿到官网 schema，已自动回退：${escapeHtml(summary.error)}</div>` : ''}
+      <div class="schema-summary">
+        <div class="schema-stat">
+          <strong>${summary.builtinOfficialCount || 0}</strong>
+          <span>内置已覆盖</span>
+        </div>
+        <div class="schema-stat">
+          <strong>${summary.dynamicOfficialCount || 0}</strong>
+          <span>自动发现字段</span>
+        </div>
+        <div class="schema-stat">
+          <strong>${summary.renderedDynamicCount || 0}</strong>
+          <span>当前可编辑动态字段</span>
+        </div>
+        <div class="schema-stat">
+          <strong>${summary.customCount || 0}</strong>
+          <span>本地扩展字段</span>
+        </div>
+      </div>
+      <div class="field-grid">
+        ${dynamicFields.length > 0 ? dynamicFields.map((field, index) => renderDynamicField(field, index)).join('') : '<div class="empty-inline schema-empty">当前配置里没有需要额外实例化的官方新字段；后续官方 schema 更新后，这里会自动补充。</div>'}
+      </div>
+      ${customFields.length > 0 ? `
+        <div class="rows-editor" style="margin-top: 18px;">
+          <div class="rows-editor__header">
+            <div>
+              <h5>本地扩展字段</h5>
+              <p>这些字段已出现在你的配置中，但当前官方 schema 未识别，保留为只读提示。</p>
+            </div>
+          </div>
+          <div class="schema-list">
+            ${customFields.map((field) => `
+              <div class="schema-list__item">
+                <div>
+                  <strong>${escapeHtml(field.path)}</strong>
+                  <div class="schema-list__path">本地自定义 / 非官方字段</div>
+                </div>
+                <div class="schema-list__value">${escapeHtml(field.value)}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+    </section>
+  `;
+}
+
 function renderCodexMcpServerCard(server, index) {
   return `
     <details class="nested-card nested-card--codex">
@@ -699,7 +905,7 @@ function renderCodexMcpServerCard(server, index) {
           <p>提供工具、资源或提示词的外部服务器。</p>
         </div>
         <div style="display: flex; gap: 8px; align-items: center;">
-          <button class="mini-button" type="button" data-action="remove-mcp" data-index="${index}" onclick="event.stopPropagation();">移除</button>
+          <button class="mini-button" type="button" data-action="remove-mcp" data-index="${index}" data-stop-summary-toggle="true">移除</button>
           <svg style="width: 14px; height: 14px; fill: var(--text-dim);" class="summary-caret" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5H7z"/></svg>
         </div>
       </summary>
@@ -746,7 +952,7 @@ function renderCodexMcpSection(draft) {
   `;
 }
 
-export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
+export function renderCodexEditor(container, { entry, draft, onDraftChange, onRefreshOfficialSchema }) {
   let currentDraft = clone(draft);
 
   container.innerHTML = `
@@ -763,22 +969,29 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
       ${renderCodexOverviewSection(currentDraft)}
       ${renderCodexFeaturesSection(currentDraft)}
       ${renderCodexAdvancedSection(currentDraft)}
+      ${renderCodexSchemaSection(currentDraft)}
       ${renderCodexMcpSection(currentDraft)}
       ${renderCodexProvidersSection(currentDraft)}
       ${renderCodexProfilesSection(currentDraft)}
     </div>
   `;
 
+  container.querySelectorAll('[data-stop-summary-toggle="true"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+    });
+  });
+
   function commit({ rerender = false } = {}) {
     onDraftChange(clone(currentDraft));
     if (rerender) {
-      renderCodexEditor(container, { entry, draft: currentDraft, onDraftChange });
+      renderCodexEditor(container, { entry, draft: currentDraft, onDraftChange, onRefreshOfficialSchema });
     }
   }
 
   container.oninput = (event) => {
     const target = event.target;
-    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement)) {
+    if (!(target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement)) {
       return;
     }
 
@@ -786,6 +999,14 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
     const value = target.type === 'checkbox' ? target.checked : target.value;
 
     if (name in currentDraft) {
+      if (name === 'sandbox_mode' && value === 'danger-full-access') {
+        const shouldEnable = confirmDangerousSandboxSelection('当前配置');
+        if (!shouldEnable) {
+          commit({ rerender: true });
+          return;
+        }
+      }
+
       currentDraft[name] = value;
       commit();
       return;
@@ -814,7 +1035,18 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
 
     if (name.startsWith('profile:')) {
       const [, profileIndex, field] = name.split(':');
-      currentDraft.profiles[Number(profileIndex)][field] = value;
+      const numericProfileIndex = Number(profileIndex);
+
+      if (field === 'sandbox_mode' && value === 'danger-full-access') {
+        const profileName = currentDraft.profiles[numericProfileIndex]?.name?.trim();
+        const shouldEnable = confirmDangerousSandboxSelection(profileName ? `Profile「${profileName}」` : '该 Profile');
+        if (!shouldEnable) {
+          commit({ rerender: true });
+          return;
+        }
+      }
+
+      currentDraft.profiles[numericProfileIndex][field] = value;
       commit();
       return;
     }
@@ -831,6 +1063,13 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
       } else {
         currentDraft.mcpServers[index][field] = value;
       }
+      commit();
+      return;
+    }
+
+    if (name.startsWith('dynamic-field:')) {
+      const index = Number(name.split(':')[1]);
+      currentDraft.dynamicFields[index].inputValue = value;
       commit();
     }
   };
@@ -856,6 +1095,12 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-provider') {
+      const provider = currentDraft.providers[index];
+      const providerLabel = provider?.name?.trim() ? `供应商「${provider.name.trim()}」` : '该供应商';
+      if (hasProviderData(provider) && !window.confirm(`确定要删除${providerLabel}吗？`)) {
+        return;
+      }
+
       currentDraft.providers.splice(index, 1);
       if (currentDraft.providers.length === 0) {
         currentDraft.providers.push(createEmptyProvider());
@@ -871,6 +1116,11 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-provider-header') {
+      const row = currentDraft.providers[index].http_headers[headerIndex];
+      if (row && (isFilledValue(row.key) || isFilledValue(row.value)) && !window.confirm('确定要删除这条请求头吗？')) {
+        return;
+      }
+
       currentDraft.providers[index].http_headers.splice(headerIndex, 1);
       if (currentDraft.providers[index].http_headers.length === 0) {
         currentDraft.providers[index].http_headers.push({ key: '', value: '' });
@@ -887,6 +1137,12 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-profile') {
+      const profile = currentDraft.profiles[index];
+      const profileLabel = profile?.name?.trim() ? `Profile「${profile.name.trim()}」` : '该 Profile';
+      if (hasProfileData(profile) && !window.confirm(`确定要删除${profileLabel}吗？`)) {
+        return;
+      }
+
       currentDraft.profiles.splice(index, 1);
       commit({ rerender: true });
       return;
@@ -899,6 +1155,12 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
     }
 
     if (action === 'remove-mcp') {
+      const server = currentDraft.mcpServers[index];
+      const serverLabel = server?.name?.trim() ? `MCP 服务器「${server.name.trim()}」` : '该 MCP 服务器';
+      if (hasMcpServerData(server) && !window.confirm(`确定要删除${serverLabel}吗？`)) {
+        return;
+      }
+
       currentDraft.mcpServers.splice(index, 1);
       commit({ rerender: true });
       return;
@@ -912,11 +1174,23 @@ export function renderCodexEditor(container, { entry, draft, onDraftChange }) {
 
     if (action === 'remove-mcp-env-row') {
       const rowIndex = Number(button.getAttribute('data-row'));
+      const row = currentDraft.mcpServers[index].envRows[rowIndex];
+      if (row && (isFilledValue(row.key) || isFilledValue(row.value)) && !window.confirm('确定要删除这条环境变量吗？')) {
+        return;
+      }
+
       currentDraft.mcpServers[index].envRows.splice(rowIndex, 1);
       if (currentDraft.mcpServers[index].envRows.length === 0) {
         currentDraft.mcpServers[index].envRows.push({ key: '', value: '' });
       }
       commit({ rerender: true });
+      return;
+    }
+
+    if (action === 'refresh-official-schema') {
+      onRefreshOfficialSchema?.();
     }
   };
 }
+
+

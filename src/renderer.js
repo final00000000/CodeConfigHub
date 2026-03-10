@@ -11,13 +11,47 @@ const state = {
   draft: null,
   dirty: false,
   projectPath: '',
-  splitRatio: 56
+  splitRatio: 56,
+  codexOfficialSchema: null
 };
 
 const elements = {};
 
+let pendingPreviewTimer = null;
+
 function getDesktopApi() {
   return window.codeConfigHubAPI || window.configManagerAPI;
+}
+
+function closeUpdateModal() {
+  const modalRoot = document.getElementById('update-modal-root');
+  if (!modalRoot) {
+    return;
+  }
+
+  modalRoot.classList.remove('is-visible');
+  modalRoot.innerHTML = '';
+}
+
+function schedulePreviewRender({ immediate = false } = {}) {
+  if (pendingPreviewTimer) {
+    window.clearTimeout(pendingPreviewTimer);
+    pendingPreviewTimer = null;
+  }
+
+  if (immediate) {
+    renderPreview();
+    return;
+  }
+
+  pendingPreviewTimer = window.setTimeout(() => {
+    pendingPreviewTimer = null;
+    renderPreview();
+  }, 120);
+}
+
+function confirmDiscardUnsavedChanges(message = '当前文件有未保存修改，继续后将丢失这些更改。是否继续？') {
+  return !state.dirty || window.confirm(message);
 }
 
 window.addEventListener('DOMContentLoaded', async () => {
@@ -27,6 +61,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindTopbarActions();
   bindSplitter();
   await discoverConfigs();
+  await loadCodexOfficialSchema(false, { silent: true });
 
   // Initialize update listener ONCE
   initUpdateListener();
@@ -45,16 +80,40 @@ function initUpdateListener() {
     modalRoot.classList.add('is-visible');
   };
 
+  modalRoot.addEventListener('click', async (event) => {
+    const actionButton = event.target.closest('[data-update-action]');
+    if (!actionButton) {
+      if (event.target === modalRoot) {
+        closeUpdateModal();
+      }
+      return;
+    }
+
+    const action = actionButton.getAttribute('data-update-action');
+    if (action === 'dismiss') {
+      closeUpdateModal();
+      return;
+    }
+
+    if (action === 'download') {
+      await api.downloadUpdate();
+      return;
+    }
+
+    if (action === 'install') {
+      await api.installUpdate();
+    }
+  });
+
   api.onUpdateStatus(async (channel, data) => {
-    // Global handling for update events
     switch (channel) {
       case 'update:available':
         showModal(`
           <h2>✨ 发现新版本</h2>
           <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布。是否立即更新？</p>
           <div class="update-modal-actions">
-            <button class="ghost-button" onclick="this.closest('.modal-root').classList.remove('is-visible')">以后再说</button>
-            <button class="primary-button" onclick="getDesktopApi().downloadUpdate()">立即更新</button>
+            <button class="ghost-button" type="button" data-update-action="dismiss">以后再说</button>
+            <button class="primary-button" type="button" data-update-action="download">立即更新</button>
           </div>
         `);
         break;
@@ -62,11 +121,11 @@ function initUpdateListener() {
       case 'update:not-available':
         if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
           showToast({ title: '✅ 已是最新', message: '当前应用已是最新发布状态。', tone: 'success' });
-          isManualUpdateCheck = false; // reset
+          isManualUpdateCheck = false;
         }
         break;
 
-      case 'update:download-progress':
+      case 'update:download-progress': {
         const percent = Math.floor(data.percent || 0);
         showModal(`
           <h2>🚀 正在下载更新</h2>
@@ -77,22 +136,24 @@ function initUpdateListener() {
           <p style="text-align: right; font-size: 0.85rem;">${percent}%</p>
         `);
         break;
+      }
 
       case 'update:downloaded':
         showModal(`
           <h2>🎉 更新已就绪</h2>
           <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
           <div class="update-modal-actions">
-            <button class="primary-button" onclick="getDesktopApi().installUpdate()">立即重启并安装</button>
+            <button class="primary-button" type="button" data-update-action="install">立即重启并安装</button>
           </div>
         `);
         break;
 
       case 'update:error':
         console.warn('Updater Error:', data);
+        closeUpdateModal();
         if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
           showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
-          isManualUpdateCheck = false; // reset
+          isManualUpdateCheck = false;
         }
         break;
     }
@@ -139,7 +200,11 @@ function bindTopbarActions() {
       return;
     }
 
-    await discoverConfigs(projectPath);
+    const switched = await discoverConfigs(projectPath, { confirmIfDirty: true });
+    if (!switched) {
+      return;
+    }
+
     showToast({
       title: '项目目录已切换',
       message: '现在会同时显示当前项目中的 Codex / Claude 配置层级。',
@@ -148,7 +213,11 @@ function bindTopbarActions() {
   };
 
   elements.rescanButton.onclick = async () => {
-    await discoverConfigs(state.projectPath);
+    const rescanned = await discoverConfigs(state.projectPath, { confirmIfDirty: true });
+    if (!rescanned) {
+      return;
+    }
+
     showToast({
       title: '扫描完成',
       message: '已重新读取当前目录中的配置文件。',
@@ -222,7 +291,55 @@ function applySplitRatio() {
   elements.workspacePanels.style.gridTemplateColumns = `${state.splitRatio}% 16px ${100 - state.splitRatio}%`;
 }
 
-async function discoverConfigs(projectPath = state.projectPath) {
+async function loadCodexOfficialSchema(forceRefresh = false, { silent = false } = {}) {
+  const api = getDesktopApi();
+  if (!api?.getCodexOfficialSchema) {
+    return;
+  }
+
+  try {
+    const result = await api.getCodexOfficialSchema(forceRefresh);
+    state.codexOfficialSchema = result;
+
+    const entry = getSelectedEntry();
+    if (entry?.editor === 'codex') {
+      if (state.dirty && state.draft) {
+        const preview = serializeCodexDraft(entry.parsed || {}, state.draft);
+        state.draft = createCodexDraft(preview.parsed || {}, state.codexOfficialSchema);
+      } else {
+        hydrateDraftFromSelection();
+      }
+      render();
+    }
+
+    if (!silent) {
+      const tone = result?.ok ? 'success' : 'danger';
+      const message = result?.ok
+        ? `已同步官方参数定义（来源：${result.source || 'unknown'}）。`
+        : `同步失败：${result?.error || '未知错误'}`;
+
+      showToast({
+        title: result?.ok ? '官方参数已刷新' : '官方参数刷新失败',
+        message,
+        tone
+      });
+    }
+  } catch (error) {
+    if (!silent) {
+      showToast({
+        title: '官方参数刷新失败',
+        message: error instanceof Error ? error.message : String(error),
+        tone: 'danger'
+      });
+    }
+  }
+}
+
+async function discoverConfigs(projectPath = state.projectPath, { confirmIfDirty = false } = {}) {
+  if (confirmIfDirty && !confirmDiscardUnsavedChanges()) {
+    return false;
+  }
+
   try {
     const result = await getDesktopApi().discoverConfigs(projectPath || '');
     const previousSelection = state.selectedId;
@@ -231,12 +348,14 @@ async function discoverConfigs(projectPath = state.projectPath) {
     state.selectedId = pickSelection(previousSelection);
     hydrateDraftFromSelection();
     render();
+    return true;
   } catch (error) {
     showToast({
       title: '扫描失败',
       message: error instanceof Error ? error.message : String(error),
       tone: 'danger'
     });
+    return false;
   }
 }
 
@@ -271,8 +390,14 @@ function hydrateDraftFromSelection() {
     return;
   }
 
+  if (entry.error) {
+    state.draft = null;
+    state.dirty = false;
+    return;
+  }
+
   if (entry.editor === 'codex') {
-    state.draft = createCodexDraft(entry.parsed || {});
+    state.draft = createCodexDraft(entry.parsed || {}, state.codexOfficialSchema);
   } else if (entry.editor === 'claude') {
     state.draft = createClaudeDraft(entry.parsed || {});
   } else {
@@ -370,7 +495,7 @@ function render() {
 
   renderWorkspaceHeader();
   renderEditor();
-  renderPreview();
+  schedulePreviewRender({ immediate: true });
   syncActionButtons();
 }
 
@@ -383,8 +508,12 @@ function renderWorkspaceHeader() {
   }
 
   elements.workspaceTitle.textContent = entry.label;
-  const statusText = entry.exists ? '已发现并载入当前文件。' : '目标文件不存在，保存时会自动创建。';
-  const modeText = entry.editor ? '支持可视化编辑。' : '当前为只读预览模式。';
+  const statusText = entry.error
+    ? '原文件解析失败，当前已切换为安全只读模式。'
+    : entry.exists
+      ? '已发现并载入当前文件。'
+      : '目标文件不存在，保存时会自动创建。';
+  const modeText = entry.error ? '请先修复原文件后再继续编辑。' : entry.editor ? '支持可视化编辑。' : '当前为只读预览模式。';
   elements.workspaceSubtitle.textContent = `${statusText} ${modeText} ${entry.path}`;
 }
 
@@ -394,10 +523,44 @@ function renderEditor() {
   if (!entry) {
     elements.editorPanel.innerHTML = `
       <div class="panel-shell panel-shell--editor panel-shell--empty">
-        <h2>没有可编辑内容</h2>
-        <p>点击左侧目录中的任意配置文件后，这里会展示对应的表单编辑器。</p>
+        <h2>当前目录还没有可编辑配置</h2>
+        <p>可以先点击上方“选择项目目录”或“重新扫描”，找到配置后这里会自动展示对应编辑器。</p>
       </div>
     `;
+    return;
+  }
+
+  if (entry.error) {
+    elements.editorPanel.innerHTML = `
+      <div class="panel-shell panel-shell--editor panel-shell--readonly">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">安全只读</p>
+            <h2>${escapeHtml(entry.label)}</h2>
+            <p>${escapeHtml(entry.description)}</p>
+          </div>
+          <span class="editor-badge editor-badge--danger">解析异常</span>
+        </div>
+
+        <div class="readonly-note readonly-note--danger">
+          <h3>原文件解析失败，已阻止可视化改写</h3>
+          <p>${escapeHtml(entry.error)}</p>
+          <p>为避免覆盖无法正确解析的原始内容，当前已禁用表单编辑和保存。请先修复原文件，再回来继续可视化编辑。</p>
+          <div class="preview-tools">
+            <button class="ghost-button" type="button" data-action="reveal-entry-file">定位原文件</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    elements.editorPanel.onclick = async (event) => {
+      const button = event.target.closest('[data-action="reveal-entry-file"]');
+      if (!button) {
+        return;
+      }
+
+      await getDesktopApi().revealFile(entry.path);
+    };
     return;
   }
 
@@ -405,7 +568,9 @@ function renderEditor() {
     renderCodexEditor(elements.editorPanel, {
       entry,
       draft: state.draft,
-      onDraftChange: handleDraftChange
+      onDraftChange: handleDraftChange,
+      officialSchemaState: state.codexOfficialSchema,
+      onRefreshOfficialSchema: () => loadCodexOfficialSchema(true)
     });
     return;
   }
@@ -431,11 +596,23 @@ function renderEditor() {
       </div>
 
       <div class="readonly-note">
-        <h3>当前 MVP 暂未提供这个文件的可视化编辑器</h3>
-        <p>右侧仍然会展示文件源码，方便查看结构。后续 Phase 2 可以扩展到 CLAUDE.md、MCP 配置和模板系统。</p>
+        <h3>当前还没有这个文件的可视化编辑器</h3>
+        <p>右侧会继续展示原文件源码；如果你只是想定位或手动修改源文件，可以直接使用下面的入口。</p>
+        <div class="preview-tools">
+          <button class="ghost-button" type="button" data-action="reveal-entry-file">定位原文件</button>
+        </div>
       </div>
     </div>
   `;
+
+  elements.editorPanel.onclick = async (event) => {
+    const button = event.target.closest('[data-action="reveal-entry-file"]');
+    if (!button) {
+      return;
+    }
+
+    await getDesktopApi().revealFile(entry.path);
+  };
 }
 
 function renderPreview() {
@@ -456,13 +633,19 @@ function renderPreview() {
 
 function syncActionButtons() {
   const entry = getSelectedEntry();
-  const canSave = Boolean(entry && entry.editor && (state.dirty || !entry.exists));
+  const hasBlockingParseError = Boolean(entry?.error && entry?.editor);
+  const canSave = Boolean(entry && entry.editor && !hasBlockingParseError && (state.dirty || !entry.exists));
 
   elements.saveButton.disabled = !canSave;
   elements.revealButton.disabled = !entry;
 
   if (!entry || !entry.editor) {
     elements.saveButton.textContent = '保存当前文件';
+    return;
+  }
+
+  if (hasBlockingParseError) {
+    elements.saveButton.textContent = '请先修复解析错误';
     return;
   }
 
@@ -477,7 +660,7 @@ function syncActionButtons() {
 function handleDraftChange(nextDraft) {
   state.draft = nextDraft;
   state.dirty = true;
-  renderPreview();
+  schedulePreviewRender();
   syncActionButtons();
 }
 
@@ -486,11 +669,8 @@ function handleSelectEntry(entryId) {
     return;
   }
 
-  if (state.dirty) {
-    const shouldContinue = window.confirm('当前文件有未保存修改，切换后将丢失这些更改。是否继续？');
-    if (!shouldContinue) {
-      return;
-    }
+  if (!confirmDiscardUnsavedChanges()) {
+    return;
   }
 
   state.selectedId = entryId;
@@ -501,6 +681,15 @@ function handleSelectEntry(entryId) {
 async function saveCurrentEntry() {
   const entry = getSelectedEntry();
   if (!entry || !entry.editor) {
+    return;
+  }
+
+  if (entry.error) {
+    showToast({
+      title: '已阻止保存',
+      message: '当前文件存在解析错误。请先修复原文件，再进行可视化保存。',
+      tone: 'danger'
+    });
     return;
   }
 
@@ -559,6 +748,14 @@ async function checkForUpdates(isManual = false) {
     }
   }
 }
+
+
+
+
+
+
+
+
 
 
 

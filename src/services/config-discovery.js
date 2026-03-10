@@ -203,8 +203,9 @@ function buildTargets(homeDirectory, projectPath) {
 
 async function hydrateTarget(entry) {
   const exists = await pathExists(entry.path);
-  let parsed = createDefaultDocument(entry);
-  let content = serializeDefaultDocument(entry, parsed);
+  const defaultDocument = createDefaultDocument(entry);
+  let parsed = exists ? null : defaultDocument;
+  let content = serializeDefaultDocument(entry, defaultDocument);
   let error = null;
   let lineEnding = '\n';
 
@@ -215,6 +216,7 @@ async function hydrateTarget(entry) {
       parsed = parseDocument(entry.format, content);
     } catch (caughtError) {
       error = caughtError instanceof Error ? caughtError.message : String(caughtError);
+      parsed = null;
       lineEnding = detectLineEnding(content);
     }
   }
@@ -250,4 +252,5 @@ module.exports = {
   createDefaultCodexConfig,
   discoverConfigFiles
 };
+
 

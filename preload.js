@@ -21,6 +21,9 @@ const desktopApi = {
   discoverConfigs(projectPath) {
     return invokeWithFallback('code-config-hub:discover', 'config-manager:discover', projectPath);
   },
+  getCodexOfficialSchema(forceRefresh) {
+    return invokeWithFallback('code-config-hub:get-codex-schema', 'config-manager:get-codex-schema', forceRefresh);
+  },
   chooseProjectDirectory() {
     return invokeWithFallback('code-config-hub:choose-project', 'config-manager:choose-project');
   },
