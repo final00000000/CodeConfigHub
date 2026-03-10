@@ -1,6 +1,6 @@
 {
   "name": "code-config-hub",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Desktop visual editor for Codex CLI and Claude Code configuration files.",
   "repository": {
     "type": "git",
@@ -11,7 +11,7 @@
     "start": "electron .",
     "dev": "electron .",
     "package:win": "electron-builder --win nsis",
-    "package:mac": "electron-builder --mac dmg"
+    "package:mac": "electron-builder --mac dmg zip"
   },
   "keywords": [
     "electron",
@@ -32,6 +32,13 @@
   "build": {
     "appId": "com.desktop.codeconfighub",
     "productName": "CodeConfigHub",
+    "electronLanguages": [
+      "zh-CN",
+      "en-US"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools"
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
