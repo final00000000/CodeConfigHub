@@ -7,6 +7,24 @@ const { saveConfigDocument } = require('./src/services/file-service');
 
 let mainWindow;
 
+function serializeUpdaterError(error) {
+  const payload = {
+    message: error instanceof Error ? error.message : String(error),
+    name: error instanceof Error ? error.name : undefined,
+    stack: error instanceof Error ? error.stack : undefined
+  };
+
+  if (error && typeof error === 'object') {
+    for (const key of ['code', 'statusCode', 'status', 'url']) {
+      if (error[key] !== undefined && error[key] !== null) {
+        payload[key] = error[key];
+      }
+    }
+  }
+
+  return payload;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1520,
@@ -151,7 +169,9 @@ autoUpdater.on('update-downloaded', (info) => {
 });
 
 autoUpdater.on('error', (err) => {
-  mainWindow.webContents.send('update:error', err.message);
+  const payload = serializeUpdaterError(err);
+  console.error('Updater error:', payload);
+  mainWindow?.webContents.send('update:error', payload);
 });
 
 registerIpcHandlers(['update:check'], async () => {

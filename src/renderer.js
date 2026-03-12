@@ -18,9 +18,100 @@ const state = {
 const elements = {};
 
 let pendingPreviewTimer = null;
+let lastUpdateErrorFingerprint = '';
+let lastUpdateErrorAt = 0;
 
 function getDesktopApi() {
   return window.codeConfigHubAPI || window.configManagerAPI;
+}
+
+function stringifyUpdateError(payload) {
+  if (!payload) {
+    return '';
+  }
+
+  if (typeof payload === 'string') {
+    return payload;
+  }
+
+  if (payload instanceof Error) {
+    return `${payload.name || 'Error'}: ${payload.message || ''} ${payload.stack || ''}`.trim();
+  }
+
+  if (typeof payload === 'object') {
+    const parts = [];
+    for (const key of ['name', 'message', 'code', 'statusCode', 'status', 'url']) {
+      if (payload[key]) {
+        parts.push(`${key}=${payload[key]}`);
+      }
+    }
+
+    if (parts.length > 0) {
+      return parts.join(' | ');
+    }
+
+    try {
+      return JSON.stringify(payload);
+    } catch {
+      return String(payload);
+    }
+  }
+
+  return String(payload);
+}
+
+function getUpdateErrorPresentation(payload) {
+  const rawText = stringifyUpdateError(payload);
+  const normalizedText = rawText.toLowerCase();
+
+  if (
+    /\b404\b/.test(normalizedText) ||
+    normalizedText.includes('not found') ||
+    normalizedText.includes('status code 404')
+  ) {
+    return {
+      fingerprint: 'update-404',
+      title: '更新资源异常',
+      message: '更新服务器返回 404。通常是 Release 资源名或 latest.yml 配置不一致，不是单纯网络问题。'
+    };
+  }
+
+  if (normalizedText.includes('latest.yml')) {
+    return {
+      fingerprint: 'update-latest-yml',
+      title: '更新元数据异常',
+      message: '无法读取更新元数据 `latest.yml`。请检查当前 Release 是否已正确上传更新描述文件。'
+    };
+  }
+
+  if (
+    /econnrefused|enotfound|eai_again|etimedout|timed out|internet disconnected|network|socket hang up|net::err_|certificate|proxy/.test(normalizedText)
+  ) {
+    return {
+      fingerprint: 'update-network',
+      title: '网络连接失败',
+      message: '无法连接 GitHub 更新服务。请检查网络、代理、证书或防火墙配置。'
+    };
+  }
+
+  return {
+    fingerprint: rawText || 'update-unknown',
+    title: '检查失败',
+    message: payload?.message || rawText || '更新检查失败，请稍后重试。'
+  };
+}
+
+function showUpdateErrorToast(payload) {
+  const presentation = getUpdateErrorPresentation(payload);
+  const now = Date.now();
+
+  if (presentation.fingerprint === lastUpdateErrorFingerprint && now - lastUpdateErrorAt < 1800) {
+    return;
+  }
+
+  lastUpdateErrorFingerprint = presentation.fingerprint;
+  lastUpdateErrorAt = now;
+  showToast({ title: presentation.title, message: presentation.message, tone: 'danger' });
 }
 
 function closeUpdateModal() {
@@ -83,9 +174,6 @@ function initUpdateListener() {
   modalRoot.addEventListener('click', async (event) => {
     const actionButton = event.target.closest('[data-update-action]');
     if (!actionButton) {
-      if (event.target === modalRoot) {
-        closeUpdateModal();
-      }
       return;
     }
 
@@ -152,7 +240,7 @@ function initUpdateListener() {
         console.warn('Updater Error:', data);
         closeUpdateModal();
         if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
-          showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
+          showUpdateErrorToast(data);
           isManualUpdateCheck = false;
         }
         break;
@@ -744,7 +832,8 @@ async function checkForUpdates(isManual = false) {
   } catch (err) {
     console.warn('Update check failed:', err);
     if (isManualUpdateCheck) {
-      showToast({ title: '检查失败', message: '无法连接到更新服务器，请检查网络。', tone: 'danger' });
+      showUpdateErrorToast(err);
+      isManualUpdateCheck = false;
     }
   }
 }
