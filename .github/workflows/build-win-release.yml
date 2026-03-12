@@ -1,0 +1,83 @@
+name: build-win-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: GitHub Release tag，例如 v0.4.8
+        required: true
+        type: string
+      upload_to_release:
+        description: 是否自动上传到对应 Release
+        required: true
+        default: true
+        type: boolean
+  release:
+    types:
+      - published
+
+jobs:
+  build-win:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build unsigned Windows artifacts
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --win nsis --x64 --publish never --config.directories.output=dist-win
+
+      - name: List built files
+        shell: pwsh
+        run: Get-ChildItem dist-win | Select-Object Name, Length
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: win-release-${{ env.RELEASE_TAG }}
+          if-no-files-found: error
+          path: |
+            dist-win/*.exe
+            dist-win/*.yml
+            dist-win/*.blockmap
+
+      - name: Ensure GitHub release exists
+        if: ${{ github.event_name == 'release' || inputs.upload_to_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --title $env:RELEASE_TAG --generate-notes
+          }
+
+      - name: Upload assets to GitHub Release
+        if: ${{ github.event_name == 'release' || inputs.upload_to_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path dist-win -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
+          if (-not $files) {
+            throw "No Windows artifacts found."
+          }
+
+          gh release upload $env:RELEASE_TAG $files.FullName --clobber
