@@ -54,8 +54,8 @@ jobs:
           name: win-release-${{ env.RELEASE_TAG }}
           if-no-files-found: error
           path: |
-            dist-win/*.exe
-            dist-win/*.yml
+            dist-win/*Setup*.exe
+            dist-win/latest.yml
             dist-win/*.blockmap
 
       - name: Ensure GitHub release exists
@@ -75,7 +75,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path dist-win -File | Where-Object { $_.Extension -in '.exe', '.yml', '.blockmap' }
+          $files = Get-ChildItem -Path dist-win -File | Where-Object {
+            $_.Name -eq 'latest.yml' -or
+            $_.Extension -eq '.blockmap' -or
+            $_.Name -like '*Setup*.exe'
+          }
           if (-not $files) {
             throw "No Windows artifacts found."
           }
