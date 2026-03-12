@@ -48,15 +48,55 @@ jobs:
         shell: pwsh
         run: Get-ChildItem dist-win | Select-Object Name, Length
 
+      - name: Normalize updater asset names
+        shell: pwsh
+        run: |
+          $latestFile = Join-Path 'dist-win' 'latest.yml'
+          if (-not (Test-Path $latestFile)) {
+            throw "latest.yml not found."
+          }
+
+          $latestContent = Get-Content $latestFile -Raw
+          $pathMatch = [regex]::Match($latestContent, '(?m)^path:\s*[''"]?(?<name>[^''"\r\n]+)[''"]?\s*$')
+          if (-not $pathMatch.Success) {
+            throw "Unable to read path from latest.yml."
+          }
+
+          $expectedExeName = $pathMatch.Groups['name'].Value.Trim()
+          $expectedBlockmapName = "$expectedExeName.blockmap"
+
+          $builtExe = Get-ChildItem dist-win -File | Where-Object { $_.Extension -eq '.exe' -and $_.Name -like '*Setup*' } | Select-Object -First 1
+          if (-not $builtExe) {
+            throw "Windows installer exe not found."
+          }
+
+          $builtBlockmap = Get-ChildItem dist-win -File | Where-Object { $_.Extension -eq '.blockmap' } | Select-Object -First 1
+          if (-not $builtBlockmap) {
+            throw "Windows blockmap not found."
+          }
+
+          $expectedExePath = Join-Path $builtExe.DirectoryName $expectedExeName
+          $expectedBlockmapPath = Join-Path $builtBlockmap.DirectoryName $expectedBlockmapName
+
+          if ($builtExe.Name -ne $expectedExeName) {
+            Copy-Item $builtExe.FullName $expectedExePath -Force
+          }
+
+          if ($builtBlockmap.Name -ne $expectedBlockmapName) {
+            Copy-Item $builtBlockmap.FullName $expectedBlockmapPath -Force
+          }
+
+          Get-ChildItem dist-win | Select-Object Name, Length
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
           name: win-release-${{ env.RELEASE_TAG }}
           if-no-files-found: error
           path: |
-            dist-win/*Setup*.exe
+            dist-win/*-Setup-*.exe
             dist-win/latest.yml
-            dist-win/*.blockmap
+            dist-win/*-Setup-*.exe.blockmap
 
       - name: Ensure GitHub release exists
         if: ${{ github.event_name == 'release' || inputs.upload_to_release }}
@@ -75,11 +115,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: pwsh
         run: |
-          $files = Get-ChildItem -Path dist-win -File | Where-Object {
-            $_.Name -eq 'latest.yml' -or
-            $_.Extension -eq '.blockmap' -or
-            $_.Name -like '*Setup*.exe'
+          $latestContent = Get-Content (Join-Path 'dist-win' 'latest.yml') -Raw
+          $pathMatch = [regex]::Match($latestContent, '(?m)^path:\s*[''"]?(?<name>[^''"\r\n]+)[''"]?\s*$')
+          if (-not $pathMatch.Success) {
+            throw "Unable to read path from latest.yml."
           }
+
+          $expectedExeName = $pathMatch.Groups['name'].Value.Trim()
+          $expectedBlockmapName = "$expectedExeName.blockmap"
+
+          $files = @(
+            Join-Path 'dist-win' $expectedExeName
+            Join-Path 'dist-win' $expectedBlockmapName
+            Join-Path 'dist-win' 'latest.yml'
+          )
+
+          $files = $files | Where-Object { Test-Path $_ }
           if (-not $files) {
             throw "No Windows artifacts found."
           }
