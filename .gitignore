@@ -3,3 +3,14 @@ dist/
 .env
 .DS_Store
 *.log
+.agent/
+.agents/
+.agent-findings/
+.claude/
+.gemini/
+.trellis/
+*-check.png
+changed_files.txt
+commit_msg.txt
+gitlog.txt
+TAURI_MIGRATION_ASSESSMENT.md

@@ -24,6 +24,9 @@ const desktopApi = {
   getCodexOfficialSchema(forceRefresh) {
     return invokeWithFallback('code-config-hub:get-codex-schema', 'config-manager:get-codex-schema', forceRefresh);
   },
+  getClaudeOfficialSchema(forceRefresh) {
+    return invokeWithFallback('code-config-hub:get-claude-schema', 'config-manager:get-claude-schema', forceRefresh);
+  },
   chooseProjectDirectory() {
     return invokeWithFallback('code-config-hub:choose-project', 'config-manager:choose-project');
   },

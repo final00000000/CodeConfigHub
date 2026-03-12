@@ -1,6 +1,6 @@
 {
   "name": "code-config-hub",
-  "version": "0.4.9",
+  "version": "0.5.0",
   "description": "Desktop visual editor for Codex CLI and Claude Code configuration files.",
   "repository": {
     "type": "git",

@@ -60,8 +60,8 @@ npm run package:mac
 |------|------|------|
 | `config.toml` | `~/.codex/config.toml` | 用户级 |
 | `config.toml` | `项目/.codex/config.toml` | 项目级 |
-| `instructions.md` | `~/.codex/instructions.md` | 用户级 |
-| `instructions.md` | `项目/.codex/instructions.md` | 项目级 |
+| `AGENTS.md` | `~/.codex/AGENTS.md` | 用户级 |
+| `AGENTS.md` | `项目/AGENTS.md` | 项目级 |
 
 ### Claude Code
 

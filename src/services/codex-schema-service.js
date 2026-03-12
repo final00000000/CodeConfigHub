@@ -1,9 +1,9 @@
 const fs = require('fs/promises');
 const path = require('path');
-const https = require('https');
 const { app } = require('electron');
+const { fetchJsonWithFallback } = require('./http-json-service');
 
-const OFFICIAL_SCHEMA_URL = 'https://openai.github.io/codex/config-schema.json';
+const OFFICIAL_SCHEMA_URL = 'https://developers.openai.com/codex/config-schema.json';
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 10000;
 const MAX_SCHEMA_BYTES = 2 * 1024 * 1024;
@@ -16,96 +16,6 @@ const OFFICIAL_DOC_URLS = [
 
 function getCachePath() {
   return path.join(app.getPath('userData'), 'codex-config-schema-cache.json');
-}
-
-function fetchJson(url, redirectCount = 0) {
-  return new Promise((resolve, reject) => {
-    let finished = false;
-    const request = https.get(url, {
-      headers: {
-        'User-Agent': `CodeConfigHub/${app.getVersion()}`,
-        Accept: 'application/json, text/plain;q=0.9, */*;q=0.8'
-      }
-    }, (response) => {
-      const { statusCode = 0, headers } = response;
-
-      if (statusCode >= 300 && statusCode < 400 && headers.location) {
-        response.resume();
-        if (redirectCount >= 5) {
-          reject(new Error('获取官方 schema 时重定向次数过多。'));
-          return;
-        }
-
-        const nextUrl = new URL(headers.location, url).toString();
-        resolve(fetchJson(nextUrl, redirectCount + 1));
-        return;
-      }
-
-      if (statusCode < 200 || statusCode >= 300) {
-        response.resume();
-        reject(new Error(`官方 schema 请求失败（HTTP ${statusCode}）。`));
-        return;
-      }
-
-      response.setEncoding('utf8');
-      let body = '';
-      let bodyBytes = 0;
-
-      response.on('data', (chunk) => {
-        if (finished) {
-          return;
-        }
-
-        body += chunk;
-        bodyBytes += Buffer.byteLength(chunk, 'utf8');
-
-        if (bodyBytes > MAX_SCHEMA_BYTES) {
-          finished = true;
-          request.destroy(new Error('官方 schema 响应过大，已中止读取。'));
-        }
-      });
-
-      response.on('end', () => {
-        if (finished) {
-          return;
-        }
-
-        finished = true;
-        try {
-          resolve(JSON.parse(body));
-        } catch (error) {
-          reject(new Error(`官方 schema JSON 解析失败：${error instanceof Error ? error.message : String(error)}`));
-        }
-      });
-
-      response.on('error', (error) => {
-        if (finished) {
-          return;
-        }
-
-        finished = true;
-        reject(error);
-      });
-    });
-
-    request.setTimeout(REQUEST_TIMEOUT_MS, () => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      request.destroy(new Error('获取官方 schema 超时，请稍后重试。'));
-    });
-
-    request.on('error', (error) => {
-      if (finished) {
-        return;
-      }
-
-      finished = true;
-      reject(error);
-    });
-  });
 }
 
 async function readCachedSchema() {
@@ -142,7 +52,11 @@ async function getCodexOfficialSchema(options = {}) {
   }
 
   try {
-    const schema = await fetchJson(OFFICIAL_SCHEMA_URL);
+    const schema = await fetchJsonWithFallback(OFFICIAL_SCHEMA_URL, {
+      timeoutMs: REQUEST_TIMEOUT_MS,
+      maxBytes: MAX_SCHEMA_BYTES,
+      errorPrefix: '获取 Codex 官方 schema'
+    });
     const payload = {
       schema,
       fetchedAt: new Date().toISOString(),

@@ -1,9 +1,10 @@
 import { escapeHtml } from './components/form-controls.js';
-import { renderSidebar } from './components/sidebar.js';
+import { getThemeToggleMeta, renderSidebar } from './components/sidebar.js';
 import { initializeToast, showToast } from './components/toast.js';
 import { renderCodePreview } from './editors/code-preview.js';
-import { createCodexDraft, renderCodexEditor, serializeCodexDraft } from './editors/codex-editor.js';
-import { createClaudeDraft, renderClaudeEditor, serializeClaudeDraft } from './editors/claude-editor.js';
+import { renderSchemaDrivenEditor } from './editors/schema-driven-editor.js';
+import { createTextDraft, renderTextEditor, serializeTextDraft } from './editors/text-editor.js';
+import { createSchemaDrivenDraft, serializeSchemaDrivenDraft } from './services/schema-driven-config.js';
 
 const state = {
   entries: [],
@@ -11,15 +12,26 @@ const state = {
   draft: null,
   dirty: false,
   projectPath: '',
-  splitRatio: 56,
-  codexOfficialSchema: null
+  splitRatio: 64,
+  codexOfficialSchema: null,
+  claudeOfficialSchema: null,
+  schemaRefreshAssistant: null,
+  appVersion: '',
+  previewSearchByEntry: {}
 };
 
 const elements = {};
+const REPOSITORY_URL = 'https://github.com/final00000000/CodeConfigHub';
 
 let pendingPreviewTimer = null;
 let lastUpdateErrorFingerprint = '';
 let lastUpdateErrorAt = 0;
+let pendingManualUpdateFeedbackTimer = null;
+let isUpdateDownloadPending = false;
+let manualUpdateRequestSequence = 0;
+let activeManualUpdateRequestId = 0;
+let lastTimedOutManualUpdateRequestId = 0;
+let updateInteractionPhase = 'idle';
 
 function getDesktopApi() {
   return window.codeConfigHubAPI || window.configManagerAPI;
@@ -124,6 +136,103 @@ function closeUpdateModal() {
   modalRoot.innerHTML = '';
 }
 
+function clearManualUpdateFeedbackTimer() {
+  if (pendingManualUpdateFeedbackTimer) {
+    window.clearTimeout(pendingManualUpdateFeedbackTimer);
+    pendingManualUpdateFeedbackTimer = null;
+  }
+}
+
+function armManualUpdateFeedbackTimer(requestId) {
+  clearManualUpdateFeedbackTimer();
+  pendingManualUpdateFeedbackTimer = window.setTimeout(() => {
+    if (!isManualUpdateCheck || requestId !== activeManualUpdateRequestId) {
+      return;
+    }
+
+    stopUpdateButtonLoading();
+    showToast({
+      title: '检查更新超时',
+      message: '本轮检查耗时较长，后台仍可能继续；在结果返回前不会接受新的手动检查。',
+      tone: 'danger'
+    });
+    lastTimedOutManualUpdateRequestId = requestId;
+    syncUpdateButtonState();
+  }, 8000);
+}
+
+function beginManualUpdateCheck() {
+  const requestId = manualUpdateRequestSequence + 1;
+  manualUpdateRequestSequence = requestId;
+  activeManualUpdateRequestId = 0;
+  lastTimedOutManualUpdateRequestId = 0;
+  isManualUpdateCheck = true;
+  return requestId;
+}
+
+function finishManualUpdateCheck(requestId) {
+  if (!requestId || requestId !== activeManualUpdateRequestId) {
+    return false;
+  }
+
+  clearManualUpdateFeedbackTimer();
+  activeManualUpdateRequestId = 0;
+  lastTimedOutManualUpdateRequestId = 0;
+  isManualUpdateCheck = false;
+  return true;
+}
+
+function resetManualUpdateCheck() {
+  clearManualUpdateFeedbackTimer();
+  activeManualUpdateRequestId = 0;
+  lastTimedOutManualUpdateRequestId = 0;
+  isManualUpdateCheck = false;
+}
+
+function capturePreviewRenderState() {
+  const codeBlock = elements.previewPanel?.querySelector('.code-block');
+  const findInput = elements.previewPanel?.querySelector('[data-role="find-input"]');
+  const activeElement = document.activeElement;
+
+  return {
+    scrollTop: codeBlock?.scrollTop || 0,
+    findInput: activeElement === findInput
+      ? {
+        selectionStart: typeof activeElement.selectionStart === 'number' ? activeElement.selectionStart : null,
+        selectionEnd: typeof activeElement.selectionEnd === 'number' ? activeElement.selectionEnd : null
+      }
+      : null
+  };
+}
+
+function restorePreviewRenderState(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+
+  const codeBlock = elements.previewPanel?.querySelector('.code-block');
+  if (codeBlock) {
+    codeBlock.scrollTop = snapshot.scrollTop || 0;
+  }
+
+  const findInput = elements.previewPanel?.querySelector('[data-role="find-input"]');
+  if (findInput && snapshot.findInput) {
+    findInput.focus({ preventScroll: true });
+
+    if (
+      typeof snapshot.findInput.selectionStart === 'number' &&
+      typeof snapshot.findInput.selectionEnd === 'number' &&
+      typeof findInput.setSelectionRange === 'function'
+    ) {
+      findInput.setSelectionRange(snapshot.findInput.selectionStart, snapshot.findInput.selectionEnd);
+    }
+  }
+}
+
+function getIncomingUpdateCheckId(payload) {
+  return Number.isInteger(payload?.checkId) ? payload.checkId : 0;
+}
+
 function schedulePreviewRender({ immediate = false } = {}) {
   if (pendingPreviewTimer) {
     window.clearTimeout(pendingPreviewTimer);
@@ -131,13 +240,17 @@ function schedulePreviewRender({ immediate = false } = {}) {
   }
 
   if (immediate) {
+    const previewSnapshot = capturePreviewRenderState();
     renderPreview();
+    restorePreviewRenderState(previewSnapshot);
     return;
   }
 
   pendingPreviewTimer = window.setTimeout(() => {
     pendingPreviewTimer = null;
+    const previewSnapshot = capturePreviewRenderState();
     renderPreview();
+    restorePreviewRenderState(previewSnapshot);
   }, 120);
 }
 
@@ -151,8 +264,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   restoreTheme();
   bindTopbarActions();
   bindSplitter();
+  await loadAppVersion();
   await discoverConfigs();
-  await loadCodexOfficialSchema(false, { silent: true });
+  await Promise.all([
+    loadCodexOfficialSchema(false, { silent: true }),
+    loadClaudeOfficialSchema(false, { silent: true })
+  ]);
 
   // Initialize update listener ONCE
   initUpdateListener();
@@ -184,18 +301,72 @@ function initUpdateListener() {
     }
 
     if (action === 'download') {
-      await api.downloadUpdate();
+      if (isUpdateDownloadPending) {
+        return;
+      }
+
+      isUpdateDownloadPending = true;
+      updateInteractionPhase = 'downloading';
+      actionButton.disabled = true;
+      actionButton.classList.add('is-loading');
+      try {
+        await api.downloadUpdate();
+      } catch (error) {
+        isUpdateDownloadPending = false;
+        updateInteractionPhase = 'available';
+        actionButton.disabled = false;
+        actionButton.classList.remove('is-loading');
+        showToast({
+          title: '下载更新失败',
+          message: error instanceof Error ? error.message : String(error),
+          tone: 'danger'
+        });
+      }
       return;
     }
 
     if (action === 'install') {
-      await api.installUpdate();
+      if (!confirmDiscardUnsavedChanges('安装更新会重启应用，未保存的改动将丢失。是否继续？')) {
+        return;
+      }
+
+      updateInteractionPhase = 'installing';
+      try {
+        const result = await api.installUpdate();
+        if (result?.ok === false) {
+          updateInteractionPhase = 'ready';
+          showToast({
+            title: '暂时无法安装更新',
+            message: result.reason === 'update-not-downloaded' ? '更新包尚未下载完成，请稍后重试。' : '安装条件未满足。',
+            tone: 'danger'
+          });
+        }
+      } catch (error) {
+        updateInteractionPhase = 'ready';
+        showToast({
+          title: '安装更新失败',
+          message: error instanceof Error ? error.message : String(error),
+          tone: 'danger'
+        });
+      }
     }
   });
 
   api.onUpdateStatus(async (channel, data) => {
+    const incomingCheckId = getIncomingUpdateCheckId(data);
+    if (activeManualUpdateRequestId && incomingCheckId && incomingCheckId !== activeManualUpdateRequestId) {
+      return;
+    }
+
     switch (channel) {
       case 'update:available':
+        isUpdateDownloadPending = false;
+        updateInteractionPhase = 'available';
+        clearManualUpdateFeedbackTimer();
+        stopUpdateButtonLoading();
+        if (isManualUpdateCheck && activeManualUpdateRequestId) {
+          finishManualUpdateCheck(activeManualUpdateRequestId);
+        }
         showModal(`
           <h2>✨ 发现新版本</h2>
           <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布。是否立即更新？</p>
@@ -204,16 +375,25 @@ function initUpdateListener() {
             <button class="primary-button" type="button" data-update-action="download">立即更新</button>
           </div>
         `);
+        syncUpdateButtonState();
         break;
 
       case 'update:not-available':
-        if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
+        isUpdateDownloadPending = false;
+        updateInteractionPhase = 'idle';
+        clearManualUpdateFeedbackTimer();
+        stopUpdateButtonLoading();
+        if (isManualUpdateCheck && activeManualUpdateRequestId) {
+          finishManualUpdateCheck(activeManualUpdateRequestId);
           showToast({ title: '✅ 已是最新', message: '当前应用已是最新发布状态。', tone: 'success' });
-          isManualUpdateCheck = false;
         }
+        syncUpdateButtonState();
         break;
 
       case 'update:download-progress': {
+        clearManualUpdateFeedbackTimer();
+        isUpdateDownloadPending = true;
+        updateInteractionPhase = 'downloading';
         const percent = Math.floor(data.percent || 0);
         showModal(`
           <h2>🚀 正在下载更新</h2>
@@ -223,10 +403,13 @@ function initUpdateListener() {
           </div>
           <p style="text-align: right; font-size: 0.85rem;">${percent}%</p>
         `);
+        syncUpdateButtonState();
         break;
       }
 
       case 'update:downloaded':
+        isUpdateDownloadPending = false;
+        updateInteractionPhase = 'ready';
         showModal(`
           <h2>🎉 更新已就绪</h2>
           <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
@@ -234,15 +417,43 @@ function initUpdateListener() {
             <button class="primary-button" type="button" data-update-action="install">立即重启并安装</button>
           </div>
         `);
+        syncUpdateButtonState();
         break;
 
       case 'update:error':
+        isUpdateDownloadPending = false;
+        clearManualUpdateFeedbackTimer();
+        stopUpdateButtonLoading();
         console.warn('Updater Error:', data);
         closeUpdateModal();
-        if (typeof isManualUpdateCheck !== 'undefined' && isManualUpdateCheck) {
-          showUpdateErrorToast(data);
-          isManualUpdateCheck = false;
+        if (updateInteractionPhase === 'downloading') {
+          showToast({
+            title: '下载更新失败',
+            message: data?.message || '更新包下载失败，请稍后重试。',
+            tone: 'danger'
+          });
+          updateInteractionPhase = 'available';
+          syncUpdateButtonState();
+          break;
         }
+
+        if (updateInteractionPhase === 'installing') {
+          showToast({
+            title: '安装更新失败',
+            message: data?.message || '更新安装失败，请稍后重试。',
+            tone: 'danger'
+          });
+          updateInteractionPhase = 'ready';
+          syncUpdateButtonState();
+          break;
+        }
+
+        updateInteractionPhase = 'idle';
+        if (isManualUpdateCheck && activeManualUpdateRequestId) {
+          finishManualUpdateCheck(activeManualUpdateRequestId);
+          showUpdateErrorToast(data);
+        }
+        syncUpdateButtonState();
         break;
     }
   });
@@ -256,7 +467,6 @@ function cacheElements() {
   elements.editorPanel = document.getElementById('editor-panel');
   elements.previewPanel = document.getElementById('preview-panel');
   elements.saveButton = document.getElementById('save-btn');
-  elements.themeButton = document.getElementById('theme-btn');
   elements.revealButton = document.getElementById('reveal-btn');
   elements.rescanButton = document.getElementById('rescan-btn');
   elements.chooseProjectButton = document.getElementById('choose-project-btn');
@@ -268,20 +478,49 @@ function cacheElements() {
 function restoreTheme() {
   const saved = localStorage.getItem('ai-config-theme') || 'light';
   document.documentElement.setAttribute('data-theme', saved);
-  elements.themeButton.textContent = saved === 'light' ? '\u{1F319}' : '\u{1F31E}';
-  elements.themeButton.title = saved === 'light' ? '\u5207\u6362\u5230\u6697\u9ED1\u4E3B\u9898' : '\u5207\u6362\u5230\u660E\u4EAE\u4E3B\u9898';
+}
+
+function bindUpdateButton() {
+  const btn = document.getElementById('check-update-btn');
+  if (!btn) return;
+  syncUpdateButtonState();
+  btn.onclick = async () => {
+    if (isManualUpdateCheck || isUpdateDownloadPending || ['downloading', 'ready', 'installing'].includes(updateInteractionPhase)) {
+      return;
+    }
+
+    if (btn.classList.contains('is-loading')) return;
+    btn.classList.add('is-loading');
+    btn.disabled = true;
+    try {
+      await checkForUpdates(true);
+    } catch (err) {
+      console.error(err);
+      stopUpdateButtonLoading();
+    }
+  };
+}
+
+function stopUpdateButtonLoading() {
+  const btn = document.getElementById('check-update-btn');
+  if (!btn) return;
+  btn.classList.remove('is-loading');
+  syncUpdateButtonState();
+}
+
+function syncUpdateButtonState() {
+  const btn = document.getElementById('check-update-btn');
+  if (!btn) {
+    return;
+  }
+
+  btn.disabled = btn.classList.contains('is-loading')
+    || isManualUpdateCheck
+    || isUpdateDownloadPending
+    || ['downloading', 'ready', 'installing'].includes(updateInteractionPhase);
 }
 
 function bindTopbarActions() {
-  elements.themeButton.onclick = () => {
-    const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-    const newTheme = isLight ? 'dark' : 'light';
-    document.documentElement.setAttribute('data-theme', newTheme);
-    localStorage.setItem('ai-config-theme', newTheme);
-    elements.themeButton.title = newTheme === 'light' ? '\u5207\u6362\u5230\u6697\u9ED1\u4E3B\u9898' : '\u5207\u6362\u5230\u660E\u4EAE\u4E3B\u9898';
-    elements.themeButton.textContent = newTheme === 'light' ? '\u{1F319}' : '\u{1F31E}';
-  };
-
   elements.chooseProjectButton.onclick = async () => {
     const projectPath = await getDesktopApi().chooseProjectDirectory();
     if (!projectPath) {
@@ -301,16 +540,23 @@ function bindTopbarActions() {
   };
 
   elements.rescanButton.onclick = async () => {
-    const rescanned = await discoverConfigs(state.projectPath, { confirmIfDirty: true });
-    if (!rescanned) {
-      return;
-    }
+    elements.rescanButton.classList.add('is-loading');
+    elements.rescanButton.disabled = true;
+    try {
+      const rescanned = await discoverConfigs(state.projectPath, { confirmIfDirty: true });
+      if (!rescanned) {
+        return;
+      }
 
-    showToast({
-      title: '扫描完成',
-      message: '已重新读取当前目录中的配置文件。',
-      tone: 'default'
-    });
+      showToast({
+        title: '扫描完成',
+        message: '已重新读取当前目录中的配置文件。',
+        tone: 'default'
+      });
+    } finally {
+      elements.rescanButton.classList.remove('is-loading');
+      elements.rescanButton.disabled = false;
+    }
   };
 
   elements.saveButton.onclick = async () => {
@@ -326,20 +572,76 @@ function bindTopbarActions() {
     await getDesktopApi().revealFile(entry.path);
   };
 
-  // Use event delegation for dynamically-created sidebar buttons
   elements.sidebar.addEventListener('click', async (e) => {
-    const btn = e.target.closest('#check-update-btn');
-    if (!btn) return;
+    const actionButton = e.target.closest('[data-sidebar-action]');
+    if (!actionButton) {
+      return;
+    }
 
-    try {
-      btn.classList.add('is-loading');
-      await checkForUpdates(true);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      btn.classList.remove('is-loading');
+    const action = actionButton.getAttribute('data-sidebar-action');
+    if (action === 'toggle-theme') {
+      toggleTheme();
+      return;
+    }
+
+    if (action === 'open-github') {
+      await getDesktopApi().openExternal(REPOSITORY_URL);
     }
   });
+}
+
+async function loadAppVersion() {
+  const api = getDesktopApi();
+  if (!api?.getVersion) {
+    return;
+  }
+
+  try {
+    state.appVersion = await api.getVersion();
+  } catch (error) {
+    console.warn('Failed to load app version:', error);
+    state.appVersion = '';
+  }
+}
+
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  const nextTheme = isLight ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', nextTheme);
+  localStorage.setItem('ai-config-theme', nextTheme);
+  syncSidebarFooterMeta();
+}
+
+function syncSidebarFooterMeta() {
+  const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+  const themeMeta = getThemeToggleMeta(currentTheme);
+  const themeButton = elements.sidebar.querySelector('[data-sidebar-action="toggle-theme"]');
+
+  if (themeButton) {
+    themeButton.title = themeMeta.title;
+    themeButton.setAttribute('aria-label', themeMeta.title);
+
+    const themeIcon = themeButton.querySelector('[data-theme-icon]');
+    if (themeIcon) {
+      themeIcon.innerHTML = themeMeta.icon;
+    }
+
+    const themeState = themeButton.querySelector('[data-theme-state]');
+    if (themeState) {
+      themeState.textContent = themeMeta.currentLabel;
+    }
+  }
+
+  const versionValue = elements.sidebar.querySelector('.sidebar-version__value');
+  if (versionValue) {
+    const nextLabel = state.appVersion ? `v${state.appVersion}` : '版本读取中';
+    versionValue.textContent = nextLabel;
+
+    const versionCard = versionValue.closest('.sidebar-version');
+    if (versionCard) {
+      versionCard.setAttribute('aria-label', `当前应用版本 ${nextLabel}`);
+    }
+  }
 }
 
 function bindSplitter() {
@@ -352,7 +654,7 @@ function bindSplitter() {
 
     const bounds = elements.workspacePanels.getBoundingClientRect();
     const ratio = ((event.clientX - bounds.left) / bounds.width) * 100;
-    state.splitRatio = Math.min(66, Math.max(38, ratio));
+    state.splitRatio = Math.min(78, Math.max(32, ratio));
     applySplitRatio();
   };
 
@@ -380,24 +682,77 @@ function applySplitRatio() {
 }
 
 async function loadCodexOfficialSchema(forceRefresh = false, { silent = false } = {}) {
-  const api = getDesktopApi();
-  if (!api?.getCodexOfficialSchema) {
+  return loadOfficialSchema('codex', forceRefresh, { silent });
+}
+
+async function loadClaudeOfficialSchema(forceRefresh = false, { silent = false } = {}) {
+  return loadOfficialSchema('claude', forceRefresh, { silent });
+}
+
+function isSchemaDrivenEntry(entry) {
+  return entry?.editor === 'codex' || entry?.editor === 'claude';
+}
+
+function getOfficialSchemaState(entry) {
+  if (entry?.assistant === 'claude') {
+    return state.claudeOfficialSchema;
+  }
+
+  if (entry?.assistant === 'codex') {
+    return state.codexOfficialSchema;
+  }
+
+  return null;
+}
+
+function rebuildSchemaDrivenDraft(entry, officialSchemaState) {
+  if (!isSchemaDrivenEntry(entry)) {
     return;
   }
 
+  const nextDraft = createSchemaDrivenDraft(entry.parsed || {}, officialSchemaState);
+
+  if (state.dirty && state.draft) {
+    const currentFieldsByPath = new Map(
+      (state.draft.schemaFields || []).map((field) => [field.actualPath, field])
+    );
+
+    nextDraft.schemaFields = nextDraft.schemaFields.map((field) => {
+      const currentField = currentFieldsByPath.get(field.actualPath);
+      return currentField ? { ...field, inputValue: currentField.inputValue } : field;
+    });
+
+    state.draft = nextDraft;
+    return;
+  }
+
+  state.draft = nextDraft;
+}
+
+async function loadOfficialSchema(assistant, forceRefresh = false, { silent = false } = {}) {
+  const api = getDesktopApi();
+  const schemaStateKey = assistant === 'claude' ? 'claudeOfficialSchema' : 'codexOfficialSchema';
+  const apiMethod = assistant === 'claude' ? 'getClaudeOfficialSchema' : 'getCodexOfficialSchema';
+  const titlePrefix = assistant === 'claude' ? 'Claude' : 'Codex';
+  const selectedEntry = getSelectedEntry();
+  const shouldRenderProgress = selectedEntry?.assistant === assistant && isSchemaDrivenEntry(selectedEntry);
+
+  if (!api?.[apiMethod]) {
+    return;
+  }
+
+  if (shouldRenderProgress) {
+    state.schemaRefreshAssistant = assistant;
+    render();
+  }
+
   try {
-    const result = await api.getCodexOfficialSchema(forceRefresh);
-    state.codexOfficialSchema = result;
+    const result = await api[apiMethod](forceRefresh);
+    state[schemaStateKey] = result;
 
     const entry = getSelectedEntry();
-    if (entry?.editor === 'codex') {
-      if (state.dirty && state.draft) {
-        const preview = serializeCodexDraft(entry.parsed || {}, state.draft);
-        state.draft = createCodexDraft(preview.parsed || {}, state.codexOfficialSchema);
-      } else {
-        hydrateDraftFromSelection();
-      }
-      render();
+    if (entry?.assistant === assistant && isSchemaDrivenEntry(entry)) {
+      rebuildSchemaDrivenDraft(entry, result);
     }
 
     if (!silent) {
@@ -407,18 +762,44 @@ async function loadCodexOfficialSchema(forceRefresh = false, { silent = false } 
         : `同步失败：${result?.error || '未知错误'}`;
 
       showToast({
-        title: result?.ok ? '官方参数已刷新' : '官方参数刷新失败',
+        title: result?.ok ? `${titlePrefix} 官方参数已刷新` : `${titlePrefix} 官方参数刷新失败`,
         message,
         tone
       });
     }
+
+    return result;
   } catch (error) {
+    const fallbackState = {
+      ok: false,
+      source: 'unavailable',
+      schema: null,
+      fetchedAt: '',
+      error: error instanceof Error ? error.message : String(error),
+      sourceUrl: state[schemaStateKey]?.sourceUrl || '',
+      docs: Array.isArray(state[schemaStateKey]?.docs) ? state[schemaStateKey].docs : []
+    };
+
+    state[schemaStateKey] = fallbackState;
+
+    const entry = getSelectedEntry();
+    if (entry?.assistant === assistant && isSchemaDrivenEntry(entry)) {
+      rebuildSchemaDrivenDraft(entry, fallbackState);
+    }
+
     if (!silent) {
       showToast({
-        title: '官方参数刷新失败',
-        message: error instanceof Error ? error.message : String(error),
+        title: `${titlePrefix} 官方参数刷新失败`,
+        message: fallbackState.error,
         tone: 'danger'
       });
+    }
+
+    return fallbackState;
+  } finally {
+    if (shouldRenderProgress) {
+      state.schemaRefreshAssistant = null;
+      render();
     }
   }
 }
@@ -432,6 +813,9 @@ async function discoverConfigs(projectPath = state.projectPath, { confirmIfDirty
     const result = await getDesktopApi().discoverConfigs(projectPath || '');
     const previousSelection = state.selectedId;
     state.entries = result.entries || [];
+    state.previewSearchByEntry = Object.fromEntries(
+      Object.entries(state.previewSearchByEntry).filter(([entryId]) => state.entries.some((entry) => entry.id === entryId))
+    );
     state.projectPath = result.projectPath || '';
     state.selectedId = pickSelection(previousSelection);
     hydrateDraftFromSelection();
@@ -459,14 +843,187 @@ function getSelectedEntry() {
   return state.entries.find((entry) => entry.id === state.selectedId) || null;
 }
 
+function getPreviewSearchState(entryId = state.selectedId) {
+  const current = state.previewSearchByEntry[entryId];
+  return {
+    query: current?.query || '',
+    activeMatchIndex: Number.isInteger(current?.activeMatchIndex) ? current.activeMatchIndex : 0,
+    scrollTop: Number.isFinite(current?.scrollTop) ? current.scrollTop : 0
+  };
+}
+
+function setPreviewSearchState(entryId, nextState) {
+  if (!entryId) {
+    return;
+  }
+
+  const currentState = state.previewSearchByEntry[entryId] || {};
+  state.previewSearchByEntry = {
+    ...state.previewSearchByEntry,
+    [entryId]: {
+      query: typeof nextState?.query === 'string' ? nextState.query : (currentState.query || ''),
+      activeMatchIndex: Number.isInteger(nextState?.activeMatchIndex)
+        ? nextState.activeMatchIndex
+        : (Number.isInteger(currentState.activeMatchIndex) ? currentState.activeMatchIndex : 0),
+      scrollTop: Number.isFinite(nextState?.scrollTop)
+        ? nextState.scrollTop
+        : (Number.isFinite(currentState.scrollTop) ? currentState.scrollTop : 0)
+    }
+  };
+}
+
 function detectLineEnding(content = '') {
   const match = String(content).match(/\r\n|\n|\r/);
   return match ? match[0] : '\n';
 }
 
-function normalizePreviewContent(content, lineEnding = '\n') {
+function detectTrailingNewline(content = '') {
+  return /(?:\r\n|\n|\r)$/.test(String(content));
+}
+
+function applyTrailingNewlinePreference(content, preserveTrailingNewline = true) {
   const text = String(content ?? '');
-  return lineEnding === '\n' ? text : text.replace(/\r?\n/g, lineEnding);
+  if (preserveTrailingNewline) {
+    return text;
+  }
+
+  return text.replace(/(?:\r\n|\n|\r)$/, '');
+}
+
+function normalizePreviewContent(content, lineEnding = '\n', preserveTrailingNewline = true) {
+  const text = String(content ?? '');
+  const normalized = lineEnding === '\n' ? text : text.replace(/\r\n|\n|\r/g, lineEnding);
+  return applyTrailingNewlinePreference(normalized, preserveTrailingNewline);
+}
+
+function escapeSelectorValue(value = '') {
+  if (window.CSS?.escape) {
+    return window.CSS.escape(value);
+  }
+
+  return String(value).replace(/["\\]/g, '\\$&');
+}
+
+function captureRenderState() {
+  const sidebarShell = elements.sidebar?.querySelector('.sidebar-shell');
+  const editorShell = elements.editorPanel?.querySelector('.panel-shell--editor');
+  const markdownInput = elements.editorPanel?.querySelector('[data-markdown-input]');
+  const markdownPreview = elements.editorPanel?.querySelector('[data-markdown-preview]');
+  const previewCodeBlock = elements.previewPanel?.querySelector('.code-block');
+  const previewFindInput = elements.previewPanel?.querySelector('[data-role="find-input"]');
+  const activeElement = document.activeElement;
+
+  let activeField = null;
+  let activePreviewField = null;
+  if (
+    activeElement &&
+    elements.editorPanel?.contains(activeElement) &&
+    typeof activeElement.getAttribute === 'function'
+  ) {
+    const name = activeElement.getAttribute('name');
+    if (name) {
+      activeField = {
+        name,
+        selectionStart: typeof activeElement.selectionStart === 'number' ? activeElement.selectionStart : null,
+        selectionEnd: typeof activeElement.selectionEnd === 'number' ? activeElement.selectionEnd : null
+      };
+    }
+  }
+
+  if (
+    activeElement &&
+    elements.previewPanel?.contains(activeElement) &&
+    activeElement === previewFindInput
+  ) {
+    activePreviewField = {
+      selectionStart: typeof activeElement.selectionStart === 'number' ? activeElement.selectionStart : null,
+      selectionEnd: typeof activeElement.selectionEnd === 'number' ? activeElement.selectionEnd : null
+    };
+  }
+
+  return {
+    entryId: editorShell?.dataset.entryId || '',
+    sidebarScrollTop: sidebarShell?.scrollTop || 0,
+    editorScrollTop: editorShell?.scrollTop || 0,
+    markdownInputScrollTop: markdownInput?.scrollTop || 0,
+    markdownPreviewScrollTop: markdownPreview?.scrollTop || 0,
+    previewScrollTop: previewCodeBlock?.scrollTop || 0,
+    activeField,
+    activePreviewField
+  };
+}
+
+function restoreRenderState(snapshot) {
+  if (!snapshot) {
+    return;
+  }
+
+  const sidebarShell = elements.sidebar?.querySelector('.sidebar-shell');
+  if (sidebarShell) {
+    sidebarShell.scrollTop = snapshot.sidebarScrollTop || 0;
+  }
+
+  const editorShell = elements.editorPanel?.querySelector('.panel-shell--editor');
+  const currentEntryId = editorShell?.dataset.entryId || '';
+  const canRestoreEditorContext = Boolean(snapshot.entryId && currentEntryId && snapshot.entryId === currentEntryId);
+
+  if (editorShell && canRestoreEditorContext) {
+    editorShell.scrollTop = snapshot.editorScrollTop || 0;
+  }
+
+  const markdownInput = elements.editorPanel?.querySelector('[data-markdown-input]');
+  if (markdownInput && canRestoreEditorContext) {
+    markdownInput.scrollTop = snapshot.markdownInputScrollTop || 0;
+  }
+
+  const markdownPreview = elements.editorPanel?.querySelector('[data-markdown-preview]');
+  if (markdownPreview && canRestoreEditorContext) {
+    markdownPreview.scrollTop = snapshot.markdownPreviewScrollTop || 0;
+  }
+
+  const previewCodeBlock = elements.previewPanel?.querySelector('.code-block');
+  if (previewCodeBlock && canRestoreEditorContext) {
+    previewCodeBlock.scrollTop = snapshot.previewScrollTop || 0;
+  }
+
+  const previewFindInput = elements.previewPanel?.querySelector('[data-role="find-input"]');
+  if (
+    previewFindInput &&
+    canRestoreEditorContext &&
+    snapshot.activePreviewField
+  ) {
+    previewFindInput.focus({ preventScroll: true });
+
+    if (
+      typeof snapshot.activePreviewField.selectionStart === 'number' &&
+      typeof snapshot.activePreviewField.selectionEnd === 'number' &&
+      typeof previewFindInput.setSelectionRange === 'function'
+    ) {
+      previewFindInput.setSelectionRange(
+        snapshot.activePreviewField.selectionStart,
+        snapshot.activePreviewField.selectionEnd
+      );
+    }
+  }
+
+  if (!canRestoreEditorContext || !snapshot.activeField?.name) {
+    return;
+  }
+
+  const nextField = elements.editorPanel?.querySelector(`[name="${escapeSelectorValue(snapshot.activeField.name)}"]`);
+  if (!(nextField instanceof HTMLElement)) {
+    return;
+  }
+
+  nextField.focus({ preventScroll: true });
+
+  if (
+    typeof snapshot.activeField.selectionStart === 'number' &&
+    typeof snapshot.activeField.selectionEnd === 'number' &&
+    typeof nextField.setSelectionRange === 'function'
+  ) {
+    nextField.setSelectionRange(snapshot.activeField.selectionStart, snapshot.activeField.selectionEnd);
+  }
 }
 
 function hydrateDraftFromSelection() {
@@ -484,10 +1041,10 @@ function hydrateDraftFromSelection() {
     return;
   }
 
-  if (entry.editor === 'codex') {
-    state.draft = createCodexDraft(entry.parsed || {}, state.codexOfficialSchema);
-  } else if (entry.editor === 'claude') {
-    state.draft = createClaudeDraft(entry.parsed || {});
+  if (isSchemaDrivenEntry(entry)) {
+    state.draft = createSchemaDrivenDraft(entry.parsed || {}, getOfficialSchemaState(entry));
+  } else if (entry.editor === 'text') {
+    state.draft = createTextDraft(entry.content || '');
   } else {
     state.draft = null;
   }
@@ -508,12 +1065,14 @@ function buildPreviewModel() {
 
   const useOriginalContent = entry.exists && !state.dirty;
 
-  if (entry.editor === 'codex') {
+  if (isSchemaDrivenEntry(entry)) {
+    const language = entry.format === 'json' ? 'json' : 'toml';
+
     if (useOriginalContent) {
       return {
         title: entry.label,
         description: entry.path,
-        language: 'toml',
+        language,
         content: entry.content || '',
         path: entry.path,
         parsed: entry.parsed,
@@ -522,12 +1081,12 @@ function buildPreviewModel() {
       };
     }
 
-    const serialized = serializeCodexDraft(entry.parsed || {}, state.draft);
+    const serialized = serializeSchemaDrivenDraft(entry.parsed || {}, state.draft, entry.format);
     return {
       title: entry.label,
       description: entry.path,
-      language: 'toml',
-      content: normalizePreviewContent(serialized.content, entry.lineEnding),
+      language,
+      content: normalizePreviewContent(serialized.content, entry.lineEnding, entry.hasTrailingNewline),
       path: entry.path,
       parsed: serialized.parsed,
       readOnly: false,
@@ -535,26 +1094,26 @@ function buildPreviewModel() {
     };
   }
 
-  if (entry.editor === 'claude') {
+  if (entry.editor === 'text') {
     if (useOriginalContent) {
       return {
         title: entry.label,
         description: entry.path,
-        language: 'json',
+        language: entry.format === 'markdown' ? 'markdown' : 'text',
         content: entry.content || '',
         path: entry.path,
-        parsed: entry.parsed,
+        parsed: null,
         readOnly: false,
         sourceLabel: entry.error ? '原文件（解析异常）' : '原文件'
       };
     }
 
-    const serialized = serializeClaudeDraft(entry.parsed || {}, state.draft);
+    const serialized = serializeTextDraft(state.draft);
     return {
       title: entry.label,
       description: entry.path,
-      language: 'json',
-      content: normalizePreviewContent(serialized.content, entry.lineEnding),
+      language: entry.format === 'markdown' ? 'markdown' : 'text',
+      content: normalizePreviewContent(serialized.content, entry.lineEnding, entry.hasTrailingNewline),
       path: entry.path,
       parsed: serialized.parsed,
       readOnly: false,
@@ -574,16 +1133,22 @@ function buildPreviewModel() {
 }
 
 function render() {
+  const renderState = captureRenderState();
   renderSidebar(elements.sidebar, {
     entries: state.entries,
     projectPath: state.projectPath,
     selectedId: state.selectedId,
-    onSelect: handleSelectEntry
+    onSelect: handleSelectEntry,
+    appVersion: state.appVersion,
+    currentTheme: document.documentElement.getAttribute('data-theme') || 'light'
   });
+  bindUpdateButton();
 
   renderWorkspaceHeader();
   renderEditor();
   schedulePreviewRender({ immediate: true });
+  restoreRenderState(renderState);
+  syncSidebarFooterMeta();
   syncActionButtons();
 }
 
@@ -608,6 +1173,13 @@ function renderWorkspaceHeader() {
 function renderEditor() {
   const entry = getSelectedEntry();
 
+  const tagEditorShell = (entryId = '') => {
+    const editorShell = elements.editorPanel?.querySelector('.panel-shell--editor');
+    if (editorShell) {
+      editorShell.dataset.entryId = entryId;
+    }
+  };
+
   if (!entry) {
     elements.editorPanel.innerHTML = `
       <div class="panel-shell panel-shell--editor panel-shell--empty">
@@ -615,6 +1187,7 @@ function renderEditor() {
         <p>可以先点击上方“选择项目目录”或“重新扫描”，找到配置后这里会自动展示对应编辑器。</p>
       </div>
     `;
+    tagEditorShell();
     return;
   }
 
@@ -649,26 +1222,29 @@ function renderEditor() {
 
       await getDesktopApi().revealFile(entry.path);
     };
+    tagEditorShell(entry.id);
     return;
   }
 
-  if (entry.editor === 'codex') {
-    renderCodexEditor(elements.editorPanel, {
+  if (isSchemaDrivenEntry(entry)) {
+    renderSchemaDrivenEditor(elements.editorPanel, {
       entry,
       draft: state.draft,
       onDraftChange: handleDraftChange,
-      officialSchemaState: state.codexOfficialSchema,
-      onRefreshOfficialSchema: () => loadCodexOfficialSchema(true)
+      onRefreshOfficialSchema: () => loadOfficialSchema(entry.assistant, true),
+      isRefreshingOfficialSchema: state.schemaRefreshAssistant === entry.assistant
     });
+    tagEditorShell(entry.id);
     return;
   }
 
-  if (entry.editor === 'claude') {
-    renderClaudeEditor(elements.editorPanel, {
+  if (entry.editor === 'text') {
+    renderTextEditor(elements.editorPanel, {
       entry,
       draft: state.draft,
       onDraftChange: handleDraftChange
     });
+    tagEditorShell(entry.id);
     return;
   }
 
@@ -701,10 +1277,20 @@ function renderEditor() {
 
     await getDesktopApi().revealFile(entry.path);
   };
+  tagEditorShell(entry.id);
 }
 
 function renderPreview() {
-  renderCodePreview(elements.previewPanel, buildPreviewModel(), {
+  const previewEntryId = state.selectedId;
+  const previewSearch = getPreviewSearchState();
+  const currentPreviewScrollTop = elements.previewPanel?.querySelector('.code-block')?.scrollTop;
+
+  renderCodePreview(elements.previewPanel, {
+    ...buildPreviewModel(),
+    searchQuery: previewSearch.query,
+    activeMatchIndex: previewSearch.activeMatchIndex,
+    scrollTop: Number.isFinite(currentPreviewScrollTop) ? currentPreviewScrollTop : previewSearch.scrollTop
+  }, {
     onCopy: async (content) => {
       await getDesktopApi().copyText(content);
       showToast({
@@ -715,6 +1301,12 @@ function renderPreview() {
     },
     onReveal: async (filePath) => {
       await getDesktopApi().revealFile(filePath);
+    },
+    onSearchStateChange: ({ query, activeMatchIndex }) => {
+      setPreviewSearchState(previewEntryId, { query, activeMatchIndex });
+    },
+    onScrollStateChange: ({ scrollTop }) => {
+      setPreviewSearchState(previewEntryId, { scrollTop });
     }
   });
 }
@@ -791,6 +1383,7 @@ async function saveCurrentEntry() {
   }
 
   try {
+    schedulePreviewRender({ immediate: true });
     const preview = buildPreviewModel();
     const result = await getDesktopApi().saveConfig({
       filePath: entry.path,
@@ -803,6 +1396,8 @@ async function saveCurrentEntry() {
     entry.content = preview.content;
     entry.parsed = preview.parsed;
     entry.lineEnding = detectLineEnding(preview.content);
+    entry.hasTrailingNewline = detectTrailingNewline(preview.content);
+    hydrateDraftFromSelection();
     state.dirty = false;
 
     render();
@@ -826,27 +1421,69 @@ async function checkForUpdates(isManual = false) {
   const api = getDesktopApi();
   if (!api || !api.checkUpdate) return;
 
-  isManualUpdateCheck = isManual;
+  const requestId = isManual ? beginManualUpdateCheck() : 0;
+  if (isManual) {
+    updateInteractionPhase = 'checking';
+    syncUpdateButtonState();
+  }
+
   try {
-    await api.checkUpdate();
+    const result = await api.checkUpdate();
+
+    if (isManual && result?.started && Number.isInteger(result.checkId)) {
+      activeManualUpdateRequestId = result.checkId;
+      armManualUpdateFeedbackTimer(result.checkId);
+      return;
+    }
+
+    if (isManual && result?.reason === 'check-in-progress') {
+      resetManualUpdateCheck();
+      stopUpdateButtonLoading();
+      updateInteractionPhase = 'checking';
+      syncUpdateButtonState();
+      showToast({
+        title: '检查仍在进行中',
+        message: result.message || '上一轮检查尚未结束，请稍候。',
+        tone: 'default'
+      });
+      return;
+    }
+
+    if (isManual && result?.skipped) {
+      resetManualUpdateCheck();
+      stopUpdateButtonLoading();
+      updateInteractionPhase = 'idle';
+      syncUpdateButtonState();
+      showToast({
+        title: '当前环境跳过检查',
+        message: result.message || '未打包开发环境不会执行真实更新检查。',
+        tone: 'default'
+      });
+      return;
+    }
+
+    if (isManual && !result) {
+      resetManualUpdateCheck();
+      stopUpdateButtonLoading();
+      updateInteractionPhase = 'idle';
+      syncUpdateButtonState();
+      showToast({
+        title: '未收到更新结果',
+        message: '当前环境没有返回更新信息；如果你正在使用开发模式，这是正常现象。',
+        tone: 'default'
+      });
+    }
   } catch (err) {
+    if (!finishManualUpdateCheck(requestId)) {
+      resetManualUpdateCheck();
+    }
     console.warn('Update check failed:', err);
-    if (isManualUpdateCheck) {
+    updateInteractionPhase = 'idle';
+    syncUpdateButtonState();
+    if (requestId && requestId !== lastTimedOutManualUpdateRequestId) {
       showUpdateErrorToast(err);
-      isManualUpdateCheck = false;
     }
   }
 }
-
-
-
-
-
-
-
-
-
-
-
 
 
