@@ -124,15 +124,15 @@ jobs:
           $expectedExeName = $pathMatch.Groups['name'].Value.Trim()
           $expectedBlockmapName = "$expectedExeName.blockmap"
 
-          $files = @(
+          $filePaths = @(
             Join-Path 'dist-win' $expectedExeName
             Join-Path 'dist-win' $expectedBlockmapName
             Join-Path 'dist-win' 'latest.yml'
           )
 
-          $files = $files | Where-Object { Test-Path $_ }
+          $files = $filePaths | Where-Object { Test-Path $_ } | ForEach-Object { (Resolve-Path $_).Path }
           if (-not $files) {
             throw "No Windows artifacts found."
           }
 
-          gh release upload $env:RELEASE_TAG $files.FullName --clobber
+          gh release upload $env:RELEASE_TAG $files --clobber
