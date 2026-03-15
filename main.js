@@ -193,7 +193,21 @@ async function refreshAllowedConfigPaths(entries = []) {
   allowedConfigPaths = new Map(metadataList.map((metadata) => [metadata.resolvedPath, metadata]));
 }
 
-async function assertAllowedConfigPath(targetPath, { requireExists = false } = {}) {
+async function refreshAllowedConfigPathMetadata(targetPath, { exists } = {}) {
+  const resolvedPath = path.resolve(String(targetPath || ''));
+  if (!allowedConfigPaths.has(resolvedPath)) {
+    return null;
+  }
+
+  const metadata = await buildAllowedConfigPathMetadata({
+    path: resolvedPath,
+    exists: typeof exists === 'boolean' ? exists : await pathExists(resolvedPath)
+  });
+  allowedConfigPaths.set(resolvedPath, metadata);
+  return metadata;
+}
+
+async function getAllowedConfigPathInfo(targetPath, { requireExists = false } = {}) {
   const resolvedPath = path.resolve(String(targetPath || ''));
   const metadata = allowedConfigPaths.get(resolvedPath);
 
@@ -215,19 +229,89 @@ async function assertAllowedConfigPath(targetPath, { requireExists = false } = {
     throw new Error('Target file does not exist.');
   }
 
+  let currentCanonicalPath = '';
   if (existsNow) {
     const stats = await fs.lstat(resolvedPath);
     if (stats.isSymbolicLink()) {
       throw new Error('Blocked path operation via symbolic link.');
     }
 
-    const currentCanonicalPath = await fs.realpath(resolvedPath);
+    currentCanonicalPath = await fs.realpath(resolvedPath);
     if (metadata.canonicalPath && currentCanonicalPath !== metadata.canonicalPath) {
       throw new Error('Blocked path operation because target canonical path changed unexpectedly.');
     }
   }
 
-  return resolvedPath;
+  return {
+    resolvedPath,
+    metadata,
+    existsNow,
+    currentCanonicalPath,
+    currentCanonicalParentPath
+  };
+}
+
+function normalizeRevealRequest(request) {
+  if (typeof request === 'string') {
+    return {
+      targetPath: request,
+      allowMissingParentReveal: true
+    };
+  }
+
+  if (request && typeof request === 'object') {
+    return {
+      targetPath: request.filePath || request.path || '',
+      allowMissingParentReveal: request.allowMissingParentReveal !== false
+    };
+  }
+
+  return {
+    targetPath: '',
+    allowMissingParentReveal: true
+  };
+}
+
+async function revealAllowedConfigTarget(request) {
+  const { targetPath, allowMissingParentReveal } = normalizeRevealRequest(request);
+  if (!targetPath) {
+    return { ok: false, reason: 'empty-path' };
+  }
+
+  const pathInfo = await getAllowedConfigPathInfo(targetPath);
+
+  if (pathInfo.existsNow) {
+    shell.showItemInFolder(pathInfo.resolvedPath);
+    return {
+      ok: true,
+      strategy: 'file',
+      requestedPath: pathInfo.resolvedPath,
+      revealedPath: pathInfo.resolvedPath,
+      targetExists: true
+    };
+  }
+
+  if (!allowMissingParentReveal) {
+    return {
+      ok: false,
+      reason: 'target-missing',
+      requestedPath: pathInfo.resolvedPath,
+      targetExists: false
+    };
+  }
+
+  const openError = await shell.openPath(pathInfo.currentCanonicalParentPath);
+  if (openError) {
+    throw new Error(openError);
+  }
+
+  return {
+    ok: true,
+    strategy: 'parent-directory',
+    requestedPath: pathInfo.resolvedPath,
+    revealedPath: pathInfo.currentCanonicalParentPath,
+    targetExists: false
+  };
 }
 
 function registerIpcHandlers(channels, listener) {
@@ -286,11 +370,13 @@ registerIpcHandlers(['code-config-hub:choose-project', 'config-manager:choose-pr
 });
 
 registerIpcHandlers(['code-config-hub:save', 'config-manager:save'], async (_event, payload) => {
-  const filePath = await assertAllowedConfigPath(payload?.filePath);
-  return saveConfigDocument({
+  const pathInfo = await getAllowedConfigPathInfo(payload?.filePath);
+  const result = await saveConfigDocument({
     ...payload,
-    filePath
+    filePath: pathInfo.resolvedPath
   });
+  await refreshAllowedConfigPathMetadata(pathInfo.resolvedPath, { exists: true });
+  return result;
 });
 
 registerIpcHandlers(['code-config-hub:copy-text', 'config-manager:copy-text'], async (_event, text) => {
@@ -299,12 +385,7 @@ registerIpcHandlers(['code-config-hub:copy-text', 'config-manager:copy-text'], a
 });
 
 registerIpcHandlers(['code-config-hub:reveal-file', 'config-manager:reveal-file'], async (_event, filePath) => {
-  if (!filePath) {
-    return { ok: false };
-  }
-
-  shell.showItemInFolder(await assertAllowedConfigPath(filePath, { requireExists: true }));
-  return { ok: true };
+  return revealAllowedConfigTarget(filePath);
 });
 
 registerIpcHandlers(['code-config-hub:get-version', 'config-manager:get-version'], async () => {

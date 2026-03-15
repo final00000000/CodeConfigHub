@@ -1,5 +1,13 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const UPDATE_STATUS_CHANNELS = [
+  'update:available',
+  'update:not-available',
+  'update:download-progress',
+  'update:downloaded',
+  'update:error'
+];
+
 function isMissingHandlerError(error) {
   const message = error instanceof Error ? error.message : String(error);
   return /No handler registered/i.test(message);
@@ -55,11 +63,42 @@ const desktopApi = {
   installUpdate() {
     return ipcRenderer.invoke('update:install-and-restart');
   },
-  onUpdateStatus(callback) {
-    const channels = ['update:available', 'update:not-available', 'update:download-progress', 'update:downloaded', 'update:error'];
-    channels.forEach(channel => {
-      ipcRenderer.on(channel, (event, data) => callback(channel, data));
+  onUpdateStatus(callback, options = {}) {
+    if (typeof callback !== 'function') {
+      return () => {};
+    }
+
+    let disposed = false;
+    const listeners = UPDATE_STATUS_CHANNELS.map((channel) => {
+      const listener = (_event, data) => callback(channel, data);
+      ipcRenderer.on(channel, listener);
+      return { channel, listener };
     });
+
+    const dispose = () => {
+      if (disposed) {
+        return;
+      }
+
+      disposed = true;
+      listeners.forEach(({ channel, listener }) => {
+        ipcRenderer.removeListener(channel, listener);
+      });
+
+      if (options.signal && typeof options.signal.removeEventListener === 'function') {
+        options.signal.removeEventListener('abort', dispose);
+      }
+    };
+
+    if (options.signal && typeof options.signal.addEventListener === 'function') {
+      if (options.signal.aborted) {
+        dispose();
+      } else {
+        options.signal.addEventListener('abort', dispose, { once: true });
+      }
+    }
+
+    return dispose;
   }
 };
 

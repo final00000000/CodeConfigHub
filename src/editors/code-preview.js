@@ -192,59 +192,122 @@ function applySearchHighlights(codeBlockInner, content, query, activeMatchIndex)
 }
 
 function formatMatchCount(query, activeMatchIndex, totalMatches) {
-  if (!query || !totalMatches) {
+  if (!query) {
     return '0 / 0';
+  }
+
+  if (!totalMatches) {
+    return '未找到';
   }
 
   return `${activeMatchIndex + 1} / ${totalMatches}`;
 }
 
+function getPreviewIdentity(sourceLabel) {
+  const normalizedLabel = String(sourceLabel || '').trim();
+
+  if (!normalizedLabel) {
+    return {
+      kind: 'generic',
+      modeLabel: '预览内容',
+      note: '当前看到的是当前条目的预览内容。'
+    };
+  }
+
+  if (normalizedLabel.includes('原文件')) {
+    return {
+      kind: 'original',
+      modeLabel: '原文件内容',
+      note: '当前看到的是磁盘中的原始文件内容。'
+    };
+  }
+
+  if (normalizedLabel.includes('预览')) {
+    return {
+      kind: 'staged',
+      modeLabel: '待写入结果',
+      note: '当前看到的是尚未保存的待写入结果。'
+    };
+  }
+
+  if (normalizedLabel.includes('默认内容')) {
+    return {
+      kind: 'default',
+      modeLabel: '默认参考内容',
+      note: '当前看到的是应用提供的默认参考内容。'
+    };
+  }
+
+  return {
+    kind: 'generic',
+    modeLabel: normalizedLabel,
+    note: '当前看到的是当前条目的预览内容。'
+  };
+}
+
 export function renderCodePreview(container, model, actions) {
+  if (container.__previewSearchTimerId) {
+    window.clearTimeout(container.__previewSearchTimerId);
+    container.__previewSearchTimerId = null;
+  }
+
   const content = model.content || '';
   const lineCount = content ? content.split(LINE_SPLIT_REGEX).length : 0;
   const fileName = (model.description || '').split(/[\\/]/).pop() || model.title || 'preview';
+  const previewTitle = model.title || fileName;
+  const previewPath = model.path || (/[\\/]/.test(String(model.description || '')) ? model.description : '');
   const langLabel = (model.language || 'text').toUpperCase();
+  const sourceLabel = model.sourceLabel || '预览内容';
+  const previewIdentity = getPreviewIdentity(sourceLabel);
+  const previewAriaLabel = previewPath
+    ? `${previewTitle}，${previewIdentity.modeLabel}，${previewPath}`
+    : `${previewTitle}，${previewIdentity.modeLabel}`;
   const initialSearchQuery = typeof model.searchQuery === 'string' ? model.searchQuery : '';
   const initialActiveMatchIndex = Number.isInteger(model.activeMatchIndex) ? model.activeMatchIndex : 0;
   const initialScrollTop = Number.isFinite(model.scrollTop) ? model.scrollTop : 0;
 
   container.innerHTML = `
-    <div class="panel-shell panel-shell--preview preview-ide">
-      <div class="preview-toolbar">
-        <div class="preview-toolbar__info">
-          <span class="preview-toolbar__file">${escapeHtml(fileName)}</span>
-          <span class="preview-chip">${escapeHtml(langLabel)}</span>
-          <span class="preview-chip">${lineCount} 行</span>
-          ${model.sourceLabel ? `<span class="preview-chip">${escapeHtml(model.sourceLabel)}</span>` : ''}
+    <div class="panel-shell panel-shell--preview" data-preview-source-kind="${escapeHtml(previewIdentity.kind)}">
+      <div class="preview-header">
+        <div class="preview-header__identity">
+          <p class="preview-header__filename">${escapeHtml(previewTitle)}</p>
+          ${previewPath ? `<p class="preview-header__path" title="${escapeHtml(previewPath)}">${escapeHtml(previewPath)}</p>` : ''}
+          <span class="preview-header__kind" data-kind="${escapeHtml(previewIdentity.kind)}">${escapeHtml(previewIdentity.modeLabel)}</span>
         </div>
-        <div class="preview-toolbar__controls">
-          <div class="preview-find" role="search">
-            <input
-              class="preview-find__input"
-              type="search"
-              placeholder="查找内容"
-              value="${escapeHtml(initialSearchQuery)}"
-              spellcheck="false"
-              autocomplete="off"
-              data-role="find-input"
-              aria-label="在配置预览中查找"
-            />
-            <span class="preview-find__count" data-role="find-count" aria-live="polite">0 / 0</span>
-            <button class="mini-button preview-find__nav" type="button" data-action="find-prev" aria-label="上一处匹配">↑</button>
-            <button class="mini-button preview-find__nav" type="button" data-action="find-next" aria-label="下一处匹配">↓</button>
-          </div>
-          <div class="preview-toolbar__actions">
-            <button class="mini-button" type="button" data-action="copy">复制</button>
-            <button class="mini-button" type="button" data-action="reveal" ${model.path ? '' : 'disabled'}>定位</button>
-          </div>
+        <div class="preview-header__meta">
+          <span class="preview-header__chip">${escapeHtml(langLabel)}</span>
+          <span class="preview-header__chip">${lineCount} 行</span>
+        </div>
+        <div class="preview-header__actions">
+          <button class="preview-header__action" type="button" data-action="copy" aria-label="复制内容">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          </button>
+          <button class="preview-header__action" type="button" data-action="reveal" aria-label="定位文件" ${previewPath ? '' : 'disabled'}>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
+          </button>
+        </div>
+        <div class="preview-header__find" role="search" aria-label="预览内容查找">
+          <input
+            class="preview-header__find-input"
+            type="search"
+            placeholder="查找..."
+            value="${escapeHtml(initialSearchQuery)}"
+            spellcheck="false"
+            autocomplete="off"
+            data-role="find-input"
+            aria-label="在配置预览中查找"
+          />
+          <span class="preview-header__find-count" data-role="find-count" aria-live="polite">0 / 0</span>
+          <button class="preview-header__find-nav" type="button" data-action="find-prev" aria-label="上一处匹配">↑</button>
+          <button class="preview-header__find-nav" type="button" data-action="find-next" aria-label="下一处匹配">↓</button>
         </div>
       </div>
-      <pre class="code-block"><span class="code-block-inner"></span></pre>
+      <pre class="code-block" data-role="code-block" tabindex="0" aria-label="${escapeHtml(previewAriaLabel)}"><span class="code-block-inner"></span></pre>
     </div>
   `;
 
   const codeBlockInner = container.querySelector('.code-block-inner');
-  const codeBlock = container.querySelector('.code-block');
+  const codeBlock = container.querySelector('[data-role="code-block"]');
   const findInput = container.querySelector('[data-role="find-input"]');
   const findCount = container.querySelector('[data-role="find-count"]');
   const prevMatchButton = container.querySelector('[data-action="find-prev"]');
@@ -255,6 +318,12 @@ export function renderCodePreview(container, model, actions) {
     totalMatches: 0
   };
   let searchInputTimer = null;
+  let isComposingSearch = false;
+
+  const syncSearchTimer = (timerId) => {
+    searchInputTimer = timerId;
+    container.__previewSearchTimerId = timerId;
+  };
 
   const renderPreviewContent = ({ resetActive = false, scrollActive = false } = {}) => {
     if (resetActive) {
@@ -283,6 +352,42 @@ export function renderCodePreview(container, model, actions) {
     }
   };
 
+  const clearSearchTimer = () => {
+    if (searchInputTimer) {
+      window.clearTimeout(searchInputTimer);
+      syncSearchTimer(null);
+    }
+  };
+
+  const requestSearchRender = ({ resetActive = false, scrollActive = false, immediate = false } = {}) => {
+    if (isComposingSearch) {
+      return;
+    }
+
+    const nextQuery = findInput.value;
+    const shouldResetActive = resetActive && nextQuery !== searchState.query;
+
+    if (!shouldResetActive && nextQuery === searchState.query && !scrollActive) {
+      return;
+    }
+
+    clearSearchTimer();
+
+    const run = () => {
+      renderPreviewContent({ resetActive: shouldResetActive, scrollActive });
+    };
+
+    if (immediate) {
+      run();
+      return;
+    }
+
+    syncSearchTimer(window.setTimeout(() => {
+      syncSearchTimer(null);
+      run();
+    }, 70));
+  };
+
   const moveMatch = (direction) => {
     if (!searchState.totalMatches) {
       return;
@@ -292,23 +397,66 @@ export function renderCodePreview(container, model, actions) {
     renderPreviewContent({ scrollActive: true });
   };
 
-  findInput.addEventListener('input', () => {
-    if (searchInputTimer) {
-      window.clearTimeout(searchInputTimer);
+  findInput.addEventListener('compositionstart', () => {
+    isComposingSearch = true;
+    clearSearchTimer();
+  });
+
+  findInput.addEventListener('compositionend', () => {
+    isComposingSearch = false;
+    requestSearchRender({ resetActive: true, immediate: true });
+  });
+
+  findInput.addEventListener('input', (event) => {
+    if (event.isComposing || isComposingSearch) {
+      return;
     }
 
-    searchInputTimer = window.setTimeout(() => {
-      searchInputTimer = null;
-      renderPreviewContent({ resetActive: true, scrollActive: false });
-    }, 70);
+    requestSearchRender({ resetActive: true });
+  });
+
+  findInput.addEventListener('search', () => {
+    requestSearchRender({ resetActive: true, immediate: true });
   });
 
   findInput.addEventListener('keydown', (event) => {
+    if (event.isComposing || isComposingSearch) {
+      return;
+    }
+
     if (event.key === 'Enter') {
       event.preventDefault();
       moveMatch(event.shiftKey ? -1 : 1);
+      return;
+    }
+
+    if (event.key === 'Escape' && findInput.value) {
+      event.preventDefault();
+      findInput.value = '';
+      requestSearchRender({ resetActive: true, immediate: true });
     }
   });
+
+  container.onkeydown = (event) => {
+    if (event.isComposing || isComposingSearch) {
+      return;
+    }
+
+    const normalizedKey = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    const hasShortcutModifier = event.ctrlKey || event.metaKey;
+
+    if (hasShortcutModifier && normalizedKey === 'f') {
+      event.preventDefault();
+      findInput.focus();
+      findInput.select();
+      return;
+    }
+
+    if (event.key === 'F3' || (hasShortcutModifier && normalizedKey === 'g')) {
+      event.preventDefault();
+      moveMatch(event.shiftKey ? -1 : 1);
+    }
+  };
 
   prevMatchButton.onclick = () => moveMatch(-1);
   nextMatchButton.onclick = () => moveMatch(1);
@@ -319,13 +467,13 @@ export function renderCodePreview(container, model, actions) {
   }, { passive: true });
 
   container.querySelector('[data-action="copy"]').onclick = () => {
-    actions.onCopy(content);
+    actions.onCopy?.(content);
   };
 
   const revealButton = container.querySelector('[data-action="reveal"]');
-  if (revealButton && model.path) {
+  if (revealButton && previewPath) {
     revealButton.onclick = () => {
-      actions.onReveal(model.path);
+      actions.onReveal?.(previewPath);
     };
   }
 
@@ -334,4 +482,3 @@ export function renderCodePreview(container, model, actions) {
     codeBlock.scrollTop = initialScrollTop;
   }
 }
-

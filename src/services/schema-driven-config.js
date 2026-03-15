@@ -244,6 +244,131 @@ function createFieldFromLeaf(leaf, schemaEntry = null) {
   };
 }
 
+const STARTER_FIELD_PRIORITY = [
+  'model',
+  'model_provider',
+  'model_reasoning_effort',
+  'approval_policy',
+  'sandbox_mode',
+  'web_search',
+  'permissions.allow',
+  'permissions.ask',
+  'fastMode',
+  'alwaysThinkingEnabled',
+  'cleanupPeriodDays',
+  'env',
+  'hooks'
+];
+
+function getStarterFieldPriority(path = '') {
+  const index = STARTER_FIELD_PRIORITY.indexOf(path);
+  return index === -1 ? Number.POSITIVE_INFINITY : index;
+}
+
+function getDefaultInputValue(defaultValue, type = 'string') {
+  if (defaultValue !== undefined) {
+    return toInputValue(defaultValue, type);
+  }
+
+  switch (type) {
+    case 'boolean':
+      return 'true';
+    case 'integer':
+    case 'number':
+      return '0';
+    case 'array':
+      return '[]';
+    case 'object':
+      return '{}';
+    case 'null':
+      return 'null';
+    default:
+      return '';
+  }
+}
+
+function normalizeFieldPathParts(pathOrParts) {
+  const parts = Array.isArray(pathOrParts)
+    ? pathOrParts
+    : String(pathOrParts || '').split('.');
+
+  return parts
+    .map((part) => String(part || '').trim())
+    .filter(Boolean);
+}
+
+export function isSchemaFieldPathValid(path = '') {
+  const parts = normalizeFieldPathParts(path);
+  if (!parts.length) {
+    return false;
+  }
+
+  return parts.every((part) => /^[A-Za-z0-9_-]+$/.test(part));
+}
+
+export function sortSchemaFields(fields = []) {
+  return [...fields].sort((left, right) => {
+    const leftPath = String(left?.actualPath || '');
+    const rightPath = String(right?.actualPath || '');
+    return leftPath.localeCompare(rightPath, 'en');
+  });
+}
+
+function createFieldFromSchemaEntry(schemaEntry, overrides = {}) {
+  const actualPath = overrides.actualPath || schemaEntry?.path || '';
+  const pathParts = normalizeFieldPathParts(overrides.pathParts || actualPath);
+  const type = overrides.type || schemaEntry?.type || 'string';
+
+  return {
+    actualPath,
+    schemaPath: schemaEntry?.path || actualPath,
+    pathParts,
+    title: overrides.title || schemaEntry?.title || humanizeKey(pathParts[pathParts.length - 1] || actualPath),
+    description: overrides.description || schemaEntry?.description || '',
+    type,
+    localType: type,
+    schemaType: schemaEntry?.type || type,
+    isTypeConflict: false,
+    enumValues: Array.isArray(schemaEntry?.enumValues) ? [...schemaEntry.enumValues] : [],
+    defaultValue: schemaEntry?.defaultValue,
+    inputValue: overrides.inputValue ?? getDefaultInputValue(schemaEntry?.defaultValue, type),
+    isOfficial: Boolean(schemaEntry),
+    groupKey: pathParts.length > 1 ? pathParts[0] : '__root__'
+  };
+}
+
+export function createSchemaDraftField({ path = '', type = 'string', schemaEntry = null, inputValue } = {}) {
+  const normalizedPath = normalizeFieldPathParts(path).join('.');
+  if (!isSchemaFieldPathValid(normalizedPath)) {
+    throw new Error('字段路径只能包含字母、数字、下划线、中划线，并使用点号表示层级。');
+  }
+
+  if (schemaEntry) {
+    return createFieldFromSchemaEntry(schemaEntry, {
+      actualPath: normalizedPath,
+      inputValue
+    });
+  }
+
+  const pathParts = normalizeFieldPathParts(normalizedPath);
+  return {
+    actualPath: normalizedPath,
+    schemaPath: normalizedPath,
+    pathParts,
+    title: humanizeKey(pathParts[pathParts.length - 1] || normalizedPath),
+    description: '',
+    type,
+    localType: type,
+    schemaType: '',
+    isTypeConflict: false,
+    enumValues: [],
+    defaultValue: undefined,
+    inputValue: inputValue ?? getDefaultInputValue(undefined, type),
+    isOfficial: false,
+    groupKey: pathParts.length > 1 ? pathParts[0] : '__root__'
+  };
+}
+
 export function createSchemaDrivenDraft(parsed = {}, officialSchemaState = null) {
   const localLeaves = flattenConfigLeaves(parsed).sort((left, right) => left.path.localeCompare(right.path, 'en'));
   const schemaEntries = officialSchemaState?.schema ? flattenSchema(officialSchemaState.schema) : [];
@@ -264,8 +389,22 @@ export function createSchemaDrivenDraft(parsed = {}, officialSchemaState = null)
     }
   }
 
+  const schemaFieldPathSet = new Set(schemaFields.map((field) => field.actualPath));
+  const availableSchemaFields = schemaEntries
+    .filter((entry) => !entry.path.includes('*') && !schemaFieldPathSet.has(entry.path))
+    .map((entry) => createFieldFromSchemaEntry(entry))
+    .sort((left, right) => {
+      const priorityDiff = getStarterFieldPriority(left.actualPath) - getStarterFieldPriority(right.actualPath);
+      if (priorityDiff !== 0) {
+        return priorityDiff;
+      }
+
+      return String(left.actualPath).localeCompare(String(right.actualPath), 'en');
+    });
+  const starterSuggestions = availableSchemaFields.slice(0, 8);
+
   return {
-    schemaFields,
+    schemaFields: sortSchemaFields(schemaFields),
     officialSync: {
       available: Boolean(officialSchemaState?.schema),
       source: officialSchemaState?.source || 'unavailable',
@@ -277,7 +416,12 @@ export function createSchemaDrivenDraft(parsed = {}, officialSchemaState = null)
       sourceUrl: officialSchemaState?.sourceUrl || '',
       docs: officialSchemaState?.docs || []
     },
-    customFields
+    customFields,
+    availableSchemaFields,
+    starterSuggestions,
+    manualFieldPath: '',
+    manualFieldType: 'string',
+    officialFieldPath: starterSuggestions[0]?.actualPath || availableSchemaFields[0]?.actualPath || ''
   };
 }
 

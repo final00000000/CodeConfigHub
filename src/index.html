@@ -11,28 +11,54 @@
 
 <body>
   <div class="app-shell">
-    <aside id="sidebar" class="sidebar"></aside>
+    <aside id="sidebar" class="sidebar" aria-label="配置对象导航"></aside>
 
     <main class="workspace">
       <header class="workspace-topbar">
-        <div class="workspace-heading">
-          <p class="workspace-kicker">桌面配置工具</p>
-          <h1 id="workspace-title">配置发现与可视化编辑</h1>
-          <p id="workspace-subtitle">自动扫描 Codex CLI 与 Claude Code 配置，并在保存前实时生成代码预览。</p>
+        <div class="workspace-context">
+          <div class="workspace-heading">
+            <p class="workspace-kicker">配置编辑器</p>
+            <h1 id="workspace-title">选择配置对象并开始修改</h1>
+            <p id="workspace-subtitle">左侧选对象，中央直接编辑；预览只在需要时展开。</p>
+          </div>
+
+          <div id="workspace-entry-meta" class="workspace-entry-meta" role="status" aria-live="polite" aria-label="当前条目元信息"></div>
         </div>
 
-        <div class="workspace-actions">
-          <button id="choose-project-btn" class="ghost-button" type="button">选择项目目录</button>
-          <button id="rescan-btn" class="ghost-button" type="button">重新扫描</button>
-          <button id="reveal-btn" class="ghost-button" type="button">定位文件</button>
-          <button id="save-btn" class="primary-button" type="button">保存当前文件</button>
+        <div class="workspace-toolbar" aria-label="工作区操作">
+          <div class="workspace-action-cluster workspace-action-cluster--global">
+            <span class="workspace-action-cluster__label">项目范围</span>
+            <div id="workspace-global-actions" class="workspace-actions workspace-global-actions" role="group" aria-label="全局操作">
+              <button id="choose-project-btn" class="ghost-button" type="button">选择项目目录</button>
+              <button id="rescan-btn" class="ghost-button" type="button">重新扫描</button>
+            </div>
+          </div>
+
+          <span id="workspace-toolbar-divider" class="workspace-toolbar__divider" aria-hidden="true"></span>
+
+          <div id="workspace-entry-action-cluster" class="workspace-action-cluster workspace-action-cluster--entry">
+            <span class="workspace-action-cluster__label">当前文件</span>
+            <div id="workspace-entry-actions" class="workspace-actions workspace-entry-actions" role="group" aria-label="当前文件操作">
+              <button id="preview-toggle-btn" class="ghost-button" type="button" aria-controls="preview-panel" aria-expanded="false">打开预览</button>
+              <button id="reveal-btn" class="ghost-button" type="button">定位文件</button>
+              <button id="save-btn" class="primary-button" type="button">保存</button>
+            </div>
+          </div>
         </div>
       </header>
 
-      <section id="workspace-panels" class="workspace-panels">
-        <div id="editor-panel" class="panel panel--editor"></div>
-        <button id="panel-splitter" class="panel-splitter" type="button" aria-label="调整编辑与预览面板宽度"></button>
-        <div id="preview-panel" class="panel panel--preview"></div>
+      <section class="workspace-main" aria-label="当前编辑工作区">
+        <section id="workspace-panels" class="workspace-panels" data-preview-mode="hidden" aria-label="编辑与预览面板">
+          <section id="editor-panel" class="panel panel--editor" aria-label="当前编辑面板"></section>
+          <button
+            id="panel-splitter"
+            class="panel-splitter"
+            type="button"
+            aria-label="调整编辑与预览面板宽度"
+            aria-controls="editor-panel preview-panel"
+          ></button>
+          <aside id="preview-panel" class="panel panel--preview" aria-label="预览面板"></aside>
+        </section>
       </section>
     </main>
 
@@ -44,3 +70,4 @@
 </body>
 
 </html>
+

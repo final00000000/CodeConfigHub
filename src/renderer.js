@@ -12,6 +12,7 @@ const state = {
   draft: null,
   dirty: false,
   projectPath: '',
+  previewMode: 'hidden',
   splitRatio: 64,
   codexOfficialSchema: null,
   claudeOfficialSchema: null,
@@ -22,6 +23,9 @@ const state = {
 
 const elements = {};
 const REPOSITORY_URL = 'https://github.com/final00000000/CodeConfigHub';
+const SPLIT_RATIO_MIN = 32;
+const SPLIT_RATIO_MAX = 78;
+const SPLIT_RATIO_STEP = 4;
 
 let pendingPreviewTimer = null;
 let lastUpdateErrorFingerprint = '';
@@ -32,6 +36,9 @@ let manualUpdateRequestSequence = 0;
 let activeManualUpdateRequestId = 0;
 let lastTimedOutManualUpdateRequestId = 0;
 let updateInteractionPhase = 'idle';
+let isComposingInput = false;
+let hasBoundGlobalUiHandlers = false;
+let lastFocusedElementBeforeUpdateModal = null;
 
 function getDesktopApi() {
   return window.codeConfigHubAPI || window.configManagerAPI;
@@ -127,13 +134,71 @@ function showUpdateErrorToast(payload) {
 }
 
 function closeUpdateModal() {
-  const modalRoot = document.getElementById('update-modal-root');
+  const modalRoot = elements.updateModalRoot || document.getElementById('update-modal-root');
   if (!modalRoot) {
     return;
   }
 
   modalRoot.classList.remove('is-visible');
+  modalRoot.setAttribute('aria-hidden', 'true');
   modalRoot.innerHTML = '';
+
+  if (
+    lastFocusedElementBeforeUpdateModal instanceof HTMLElement &&
+    lastFocusedElementBeforeUpdateModal.isConnected &&
+    typeof lastFocusedElementBeforeUpdateModal.focus === 'function'
+  ) {
+    lastFocusedElementBeforeUpdateModal.focus({ preventScroll: true });
+  }
+
+  lastFocusedElementBeforeUpdateModal = null;
+}
+
+function getUpdateModalFocusableElements(modalRoot = elements.updateModalRoot) {
+  if (!modalRoot) {
+    return [];
+  }
+
+  return [...modalRoot.querySelectorAll(
+    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  )].filter((node) => node instanceof HTMLElement && !node.hasAttribute('hidden'));
+}
+
+function showUpdateModal(content) {
+  const modalRoot = elements.updateModalRoot || document.getElementById('update-modal-root');
+  if (!modalRoot) {
+    return;
+  }
+
+  if (!modalRoot.classList.contains('is-visible')) {
+    lastFocusedElementBeforeUpdateModal = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+  }
+
+  modalRoot.innerHTML = `<div class="update-modal" role="dialog" aria-modal="true" tabindex="-1">${content}</div>`;
+  modalRoot.classList.add('is-visible');
+  modalRoot.setAttribute('aria-hidden', 'false');
+
+  const modal = modalRoot.querySelector('.update-modal');
+  const heading = modal?.querySelector('h2');
+  if (heading) {
+    if (!heading.id) {
+      heading.id = 'update-modal-title';
+    }
+    modal?.setAttribute('aria-labelledby', heading.id);
+  }
+
+  const description = modal?.querySelector('p');
+  if (description) {
+    if (!description.id) {
+      description.id = 'update-modal-description';
+    }
+    modal?.setAttribute('aria-describedby', description.id);
+  }
+
+  const focusTarget = getUpdateModalFocusableElements(modalRoot)[0] || modal;
+  focusTarget?.focus({ preventScroll: true });
 }
 
 function clearManualUpdateFeedbackTimer() {
@@ -195,6 +260,7 @@ function capturePreviewRenderState() {
   const activeElement = document.activeElement;
 
   return {
+    entryId: elements.previewPanel?.dataset.entryId || '',
     scrollTop: codeBlock?.scrollTop || 0,
     findInput: activeElement === findInput
       ? {
@@ -207,6 +273,11 @@ function capturePreviewRenderState() {
 
 function restorePreviewRenderState(snapshot) {
   if (!snapshot) {
+    return;
+  }
+
+  const currentEntryId = elements.previewPanel?.dataset.entryId || '';
+  if (snapshot.entryId && currentEntryId && snapshot.entryId !== currentEntryId) {
     return;
   }
 
@@ -239,6 +310,10 @@ function schedulePreviewRender({ immediate = false } = {}) {
     pendingPreviewTimer = null;
   }
 
+  if (!shouldShowPreview()) {
+    return;
+  }
+
   if (immediate) {
     const previewSnapshot = capturePreviewRenderState();
     renderPreview();
@@ -248,6 +323,10 @@ function schedulePreviewRender({ immediate = false } = {}) {
 
   pendingPreviewTimer = window.setTimeout(() => {
     pendingPreviewTimer = null;
+    if (!shouldShowPreview()) {
+      return;
+    }
+
     const previewSnapshot = capturePreviewRenderState();
     renderPreview();
     restorePreviewRenderState(previewSnapshot);
@@ -260,6 +339,7 @@ function confirmDiscardUnsavedChanges(message = '当前文件有未保存修改�
 
 window.addEventListener('DOMContentLoaded', async () => {
   cacheElements();
+  bindGlobalUiHandlers();
   initializeToast(elements.toastRoot);
   restoreTheme();
   bindTopbarActions();
@@ -280,15 +360,60 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 function initUpdateListener() {
   const api = getDesktopApi();
-  const modalRoot = document.getElementById('update-modal-root');
+  const modalRoot = elements.updateModalRoot || document.getElementById('update-modal-root');
   if (!api || !modalRoot) return;
 
-  const showModal = (content) => {
-    modalRoot.innerHTML = `<div class="update-modal">${content}</div>`;
-    modalRoot.classList.add('is-visible');
-  };
+  modalRoot.setAttribute('aria-hidden', 'true');
+
+  modalRoot.addEventListener('keydown', (event) => {
+    if (!modalRoot.classList.contains('is-visible')) {
+      return;
+    }
+
+    if ((event.key === 'Escape' || event.key === 'Esc') && !event.isComposing && !isComposingInput) {
+      if (modalRoot.querySelector('[data-update-action="dismiss"]')) {
+        event.preventDefault();
+        closeUpdateModal();
+      }
+      return;
+    }
+
+    if (event.key !== 'Tab') {
+      return;
+    }
+
+    const focusableElements = getUpdateModalFocusableElements(modalRoot);
+    const modal = modalRoot.querySelector('.update-modal');
+    if (!focusableElements.length) {
+      event.preventDefault();
+      modal?.focus({ preventScroll: true });
+      return;
+    }
+
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+    const activeElement = document.activeElement;
+
+    if (event.shiftKey) {
+      if (activeElement === firstElement || activeElement === modalRoot) {
+        event.preventDefault();
+        lastElement.focus({ preventScroll: true });
+      }
+      return;
+    }
+
+    if (activeElement === lastElement || activeElement === modal) {
+      event.preventDefault();
+      firstElement.focus({ preventScroll: true });
+    }
+  });
 
   modalRoot.addEventListener('click', async (event) => {
+    if (event.target === modalRoot && modalRoot.querySelector('[data-update-action="dismiss"]')) {
+      closeUpdateModal();
+      return;
+    }
+
     const actionButton = event.target.closest('[data-update-action]');
     if (!actionButton) {
       return;
@@ -367,7 +492,7 @@ function initUpdateListener() {
         if (isManualUpdateCheck && activeManualUpdateRequestId) {
           finishManualUpdateCheck(activeManualUpdateRequestId);
         }
-        showModal(`
+        showUpdateModal(`
           <h2>✨ 发现新版本</h2>
           <p>全新版本的 CodeConfigHub (${escapeHtml(data.version)}) 已经发布。是否立即更新？</p>
           <div class="update-modal-actions">
@@ -395,7 +520,7 @@ function initUpdateListener() {
         isUpdateDownloadPending = true;
         updateInteractionPhase = 'downloading';
         const percent = Math.floor(data.percent || 0);
-        showModal(`
+        showUpdateModal(`
           <h2>🚀 正在下载更新</h2>
           <p>请稍候，我们正在为你准备最新版本的组件...</p>
           <div class="update-progress-container">
@@ -410,7 +535,7 @@ function initUpdateListener() {
       case 'update:downloaded':
         isUpdateDownloadPending = false;
         updateInteractionPhase = 'ready';
-        showModal(`
+        showUpdateModal(`
           <h2>🎉 更新已就绪</h2>
           <p>最新版本已经下载完成。点击下方按钮将立即重启应用并完成安装。</p>
           <div class="update-modal-actions">
@@ -464,20 +589,43 @@ function cacheElements() {
   elements.sidebar = document.getElementById('sidebar');
   elements.workspaceTitle = document.getElementById('workspace-title');
   elements.workspaceSubtitle = document.getElementById('workspace-subtitle');
+  elements.workspaceEntryMeta = document.getElementById('workspace-entry-meta');
   elements.editorPanel = document.getElementById('editor-panel');
   elements.previewPanel = document.getElementById('preview-panel');
   elements.saveButton = document.getElementById('save-btn');
   elements.revealButton = document.getElementById('reveal-btn');
+  elements.previewToggleButton = document.getElementById('preview-toggle-btn');
   elements.rescanButton = document.getElementById('rescan-btn');
   elements.chooseProjectButton = document.getElementById('choose-project-btn');
+  elements.workspaceGlobalActions = document.getElementById('workspace-global-actions');
+  elements.workspaceEntryActions = document.getElementById('workspace-entry-actions');
+  elements.workspaceEntryActionCluster = document.getElementById('workspace-entry-action-cluster');
+  elements.workspaceToolbarDivider = document.getElementById('workspace-toolbar-divider');
   elements.toastRoot = document.getElementById('toast-root');
   elements.panelSplitter = document.getElementById('panel-splitter');
   elements.workspacePanels = document.getElementById('workspace-panels');
+  elements.updateModalRoot = document.getElementById('update-modal-root');
 }
 
 function restoreTheme() {
   const saved = localStorage.getItem('ai-config-theme') || 'light';
   document.documentElement.setAttribute('data-theme', saved);
+}
+
+function bindGlobalUiHandlers() {
+  if (hasBoundGlobalUiHandlers) {
+    return;
+  }
+
+  document.addEventListener('compositionstart', () => {
+    isComposingInput = true;
+  }, true);
+
+  document.addEventListener('compositionend', () => {
+    isComposingInput = false;
+  }, true);
+
+  hasBoundGlobalUiHandlers = true;
 }
 
 function bindUpdateButton() {
@@ -521,6 +669,13 @@ function syncUpdateButtonState() {
 }
 
 function bindTopbarActions() {
+  elements.chooseProjectButton.textContent = state.projectPath ? '切换项目' : '选择项目';
+  elements.chooseProjectButton.title = '切换当前项目范围（全局操作）';
+  elements.chooseProjectButton.setAttribute('aria-label', '选择项目目录');
+  elements.rescanButton.textContent = '重新扫描';
+  elements.rescanButton.title = '重新扫描个人默认与当前项目配置（全局操作）';
+  elements.rescanButton.setAttribute('aria-label', '重新扫描全部配置');
+
   elements.chooseProjectButton.onclick = async () => {
     const projectPath = await getDesktopApi().chooseProjectDirectory();
     if (!projectPath) {
@@ -559,17 +714,20 @@ function bindTopbarActions() {
     }
   };
 
+  elements.previewToggleButton.onclick = () => {
+    if (!getSelectedEntry()) {
+      return;
+    }
+
+    setPreviewMode(shouldShowPreview() ? 'hidden' : 'split');
+  };
+
   elements.saveButton.onclick = async () => {
     await saveCurrentEntry();
   };
 
   elements.revealButton.onclick = async () => {
-    const entry = getSelectedEntry();
-    if (!entry) {
-      return;
-    }
-
-    await getDesktopApi().revealFile(entry.path);
+    await revealEntryTarget();
   };
 
   elements.sidebar.addEventListener('click', async (e) => {
@@ -644,41 +802,247 @@ function syncSidebarFooterMeta() {
   }
 }
 
-function bindSplitter() {
-  let dragging = false;
+function shouldShowPreview(entry = getSelectedEntry()) {
+  return Boolean(entry) && state.previewMode === 'split';
+}
 
-  const handlePointerMove = (event) => {
-    if (!dragging) {
-      return;
-    }
+function getRevealTargetPath(entry = getSelectedEntry(), fallbackPath = '') {
+  return entry?.revealTargetPath || entry?.path || fallbackPath || '';
+}
 
-    const bounds = elements.workspacePanels.getBoundingClientRect();
-    const ratio = ((event.clientX - bounds.left) / bounds.width) * 100;
-    state.splitRatio = Math.min(78, Math.max(32, ratio));
-    applySplitRatio();
+async function revealEntryTarget(entry = getSelectedEntry(), fallbackPath = '') {
+  const targetPath = getRevealTargetPath(entry, fallbackPath);
+  if (!targetPath) {
+    return;
+  }
+
+  await getDesktopApi().revealFile(targetPath);
+}
+
+function getPreviewIdentityMeta(sourceLabel = '') {
+  const normalizedLabel = String(sourceLabel || '').trim();
+
+  if (!normalizedLabel) {
+    return {
+      modeLabel: '预览内容',
+      note: '预览会始终跟随当前选中的条目。'
+    };
+  }
+
+  if (normalizedLabel.includes('原文件')) {
+    return {
+      modeLabel: '原文件内容',
+      note: '当前对应磁盘中的原始文件内容。'
+    };
+  }
+
+  if (normalizedLabel.includes('新文件预览')) {
+    return {
+      modeLabel: '待创建文件',
+      note: '当前对应首次保存时将要写入的新文件内容。'
+    };
+  }
+
+  if (normalizedLabel.includes('预览')) {
+    return {
+      modeLabel: '待写入结果',
+      note: '当前对应尚未保存的待写入结果。'
+    };
+  }
+
+  if (normalizedLabel.includes('默认内容')) {
+    return {
+      modeLabel: '默认参考内容',
+      note: '当前显示的是应用提供的默认参考内容。'
+    };
+  }
+
+  return {
+    modeLabel: normalizedLabel,
+    note: '预览会始终跟随当前选中的条目。'
   };
+}
 
-  elements.panelSplitter.addEventListener('pointerdown', (event) => {
-    dragging = true;
-    elements.panelSplitter.setPointerCapture(event.pointerId);
-  });
+function renderWorkspaceEntryMeta() {
+  if (!elements.workspaceEntryMeta) {
+    return;
+  }
 
-  elements.panelSplitter.addEventListener('pointerup', (event) => {
-    dragging = false;
-    elements.panelSplitter.releasePointerCapture(event.pointerId);
-  });
+  const entry = getSelectedEntry();
+  if (!entry) {
+    elements.workspaceEntryMeta.innerHTML = '';
+    return;
+  }
 
-  elements.panelSplitter.addEventListener('pointermove', handlePointerMove);
-  window.addEventListener('pointermove', handlePointerMove);
-  window.addEventListener('pointerup', () => {
-    dragging = false;
-  });
+  const scopeValue = entry.scopeVariantLabel || entry.scopeLabel || (entry.scope === 'project' ? '项目级' : '用户级');
+  const pathValue = entry.compactPath || entry.path;
+  const stateMeta = entry.error
+    ? { label: '解析异常', className: 'is-danger' }
+    : state.dirty
+      ? { label: '未保存', className: 'is-highlight' }
+      : entry.exists
+        ? { label: '已载入', className: 'is-muted' }
+        : { label: '待创建', className: 'is-success' };
+  const metaItems = [
+    entry.assistantLabel ? `<span class="workspace-meta-pill">${escapeHtml(entry.assistantLabel)}</span>` : '',
+    scopeValue ? `<span class="workspace-meta-pill">${escapeHtml(scopeValue)}</span>` : '',
+    `<span class="workspace-meta-pill workspace-meta-pill--state ${escapeHtml(stateMeta.className)}">${escapeHtml(stateMeta.label)}</span>`,
+    pathValue ? `
+      <span class="workspace-meta-path">
+        <span class="workspace-meta-path__label">文件</span>
+        <code title="${escapeHtml(entry.path || '')}">${escapeHtml(pathValue)}</code>
+      </span>
+    ` : ''
+  ].filter(Boolean);
+
+  elements.workspaceEntryMeta.innerHTML = metaItems.join('');
+}
+
+function syncPreviewPanelLayout() {
+  const previewVisible = shouldShowPreview();
+
+  if (elements.workspacePanels) {
+    elements.workspacePanels.dataset.previewMode = previewVisible ? 'split' : 'hidden';
+  }
+
+  if (elements.previewPanel) {
+    elements.previewPanel.setAttribute('aria-hidden', String(!previewVisible));
+  }
+
+  if (elements.panelSplitter) {
+    elements.panelSplitter.disabled = !previewVisible;
+    elements.panelSplitter.tabIndex = previewVisible ? 0 : -1;
+    elements.panelSplitter.setAttribute('aria-hidden', String(!previewVisible));
+    elements.panelSplitter.setAttribute('aria-disabled', String(!previewVisible));
+    elements.panelSplitter.setAttribute('role', 'separator');
+    elements.panelSplitter.setAttribute('aria-orientation', 'vertical');
+  }
 
   applySplitRatio();
 }
 
+function setPreviewMode(mode) {
+  state.previewMode = mode === 'split' ? 'split' : 'hidden';
+  syncPreviewPanelLayout();
+  renderWorkspaceHeader();
+  renderWorkspaceEntryMeta();
+  syncActionButtons();
+
+  if (shouldShowPreview()) {
+    schedulePreviewRender({ immediate: true });
+  } else {
+    renderPreview();
+  }
+}
+
+function bindSplitter() {
+  let dragging = false;
+
+  const clampSplitRatio = (value) => Math.min(SPLIT_RATIO_MAX, Math.max(SPLIT_RATIO_MIN, value));
+  const canAdjustSplitter = () => shouldShowPreview() && !elements.panelSplitter?.disabled;
+
+  const stopDragging = (event) => {
+    if (!dragging) {
+      return;
+    }
+
+    dragging = false;
+    if (event?.pointerId !== undefined && elements.panelSplitter?.hasPointerCapture?.(event.pointerId)) {
+      elements.panelSplitter.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const setSplitRatioFromClientX = (clientX) => {
+    const bounds = elements.workspacePanels?.getBoundingClientRect();
+    if (!bounds || !bounds.width) {
+      return;
+    }
+
+    const ratio = ((clientX - bounds.left) / bounds.width) * 100;
+    state.splitRatio = clampSplitRatio(ratio);
+    applySplitRatio();
+  };
+
+  const handlePointerMove = (event) => {
+    if (!dragging || !canAdjustSplitter()) {
+      return;
+    }
+
+    setSplitRatioFromClientX(event.clientX);
+  };
+
+  elements.panelSplitter.addEventListener('pointerdown', (event) => {
+    if (!canAdjustSplitter()) {
+      return;
+    }
+
+    dragging = true;
+    event.preventDefault();
+    elements.panelSplitter.setPointerCapture(event.pointerId);
+  });
+
+  elements.panelSplitter.addEventListener('pointerup', stopDragging);
+  elements.panelSplitter.addEventListener('pointercancel', stopDragging);
+  elements.panelSplitter.addEventListener('lostpointercapture', stopDragging);
+  elements.panelSplitter.addEventListener('pointermove', handlePointerMove);
+  window.addEventListener('pointermove', handlePointerMove);
+  window.addEventListener('pointerup', stopDragging);
+  window.addEventListener('pointercancel', stopDragging);
+
+  elements.panelSplitter.addEventListener('keydown', (event) => {
+    if (!canAdjustSplitter() || event.isComposing || isComposingInput) {
+      return;
+    }
+
+    let nextRatio = state.splitRatio;
+    switch (event.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
+        nextRatio = state.splitRatio - SPLIT_RATIO_STEP;
+        break;
+      case 'ArrowRight':
+      case 'ArrowUp':
+        nextRatio = state.splitRatio + SPLIT_RATIO_STEP;
+        break;
+      case 'Home':
+        nextRatio = SPLIT_RATIO_MIN;
+        break;
+      case 'End':
+        nextRatio = SPLIT_RATIO_MAX;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    state.splitRatio = clampSplitRatio(nextRatio);
+    applySplitRatio();
+  });
+
+  syncPreviewPanelLayout();
+}
+
 function applySplitRatio() {
-  elements.workspacePanels.style.gridTemplateColumns = `${state.splitRatio}% 16px ${100 - state.splitRatio}%`;
+  const normalizedRatio = Math.round(Math.min(SPLIT_RATIO_MAX, Math.max(SPLIT_RATIO_MIN, state.splitRatio)));
+  state.splitRatio = normalizedRatio;
+
+  if (elements.panelSplitter) {
+    elements.panelSplitter.setAttribute('aria-valuemin', String(SPLIT_RATIO_MIN));
+    elements.panelSplitter.setAttribute('aria-valuemax', String(SPLIT_RATIO_MAX));
+    elements.panelSplitter.setAttribute('aria-valuenow', String(normalizedRatio));
+    elements.panelSplitter.setAttribute('aria-valuetext', `编辑面板宽度 ${normalizedRatio}%`);
+  }
+
+  if (!elements.workspacePanels) {
+    return;
+  }
+
+  if (!shouldShowPreview()) {
+    elements.workspacePanels.style.removeProperty('grid-template-columns');
+    return;
+  }
+
+  elements.workspacePanels.style.gridTemplateColumns = `${normalizedRatio}% var(--splitter-size, 16px) ${100 - normalizedRatio}%`;
 }
 
 async function loadCodexOfficialSchema(forceRefresh = false, { silent = false } = {}) {
@@ -716,13 +1080,29 @@ function rebuildSchemaDrivenDraft(entry, officialSchemaState) {
     const currentFieldsByPath = new Map(
       (state.draft.schemaFields || []).map((field) => [field.actualPath, field])
     );
+    const nextFieldPaths = new Set((nextDraft.schemaFields || []).map((field) => field.actualPath));
+    const preservedExtraFields = (state.draft.schemaFields || [])
+      .filter((field) => field?.actualPath && !nextFieldPaths.has(field.actualPath))
+      .map((field) => ({
+        ...field,
+        enumValues: Array.isArray(field.enumValues) ? [...field.enumValues] : field.enumValues
+      }));
 
     nextDraft.schemaFields = nextDraft.schemaFields.map((field) => {
       const currentField = currentFieldsByPath.get(field.actualPath);
       return currentField ? { ...field, inputValue: currentField.inputValue } : field;
     });
+    if (preservedExtraFields.length > 0) {
+      nextDraft.schemaFields = [...nextDraft.schemaFields, ...preservedExtraFields]
+        .sort((left, right) => String(left.actualPath || '').localeCompare(String(right.actualPath || ''), 'en'));
+    }
 
-    state.draft = nextDraft;
+    state.draft = {
+      ...nextDraft,
+      ...(typeof state.draft.manualFieldPath === 'string' ? { manualFieldPath: state.draft.manualFieldPath } : {}),
+      ...(typeof state.draft.manualFieldType === 'string' ? { manualFieldType: state.draft.manualFieldType } : {}),
+      ...(typeof state.draft.officialFieldPath === 'string' ? { officialFieldPath: state.draft.officialFieldPath } : {})
+    };
     return;
   }
 
@@ -1064,14 +1444,16 @@ function buildPreviewModel() {
   }
 
   const useOriginalContent = entry.exists && !state.dirty;
+  const previewTitle = entry.navTitle || entry.label;
+  const previewDescription = entry.compactPath || entry.path;
 
   if (isSchemaDrivenEntry(entry)) {
     const language = entry.format === 'json' ? 'json' : 'toml';
 
     if (useOriginalContent) {
       return {
-        title: entry.label,
-        description: entry.path,
+        title: previewTitle,
+        description: previewDescription,
         language,
         content: entry.content || '',
         path: entry.path,
@@ -1083,8 +1465,8 @@ function buildPreviewModel() {
 
     const serialized = serializeSchemaDrivenDraft(entry.parsed || {}, state.draft, entry.format);
     return {
-      title: entry.label,
-      description: entry.path,
+      title: previewTitle,
+      description: previewDescription,
       language,
       content: normalizePreviewContent(serialized.content, entry.lineEnding, entry.hasTrailingNewline),
       path: entry.path,
@@ -1097,8 +1479,8 @@ function buildPreviewModel() {
   if (entry.editor === 'text') {
     if (useOriginalContent) {
       return {
-        title: entry.label,
-        description: entry.path,
+        title: previewTitle,
+        description: previewDescription,
         language: entry.format === 'markdown' ? 'markdown' : 'text',
         content: entry.content || '',
         path: entry.path,
@@ -1110,8 +1492,8 @@ function buildPreviewModel() {
 
     const serialized = serializeTextDraft(state.draft);
     return {
-      title: entry.label,
-      description: entry.path,
+      title: previewTitle,
+      description: previewDescription,
       language: entry.format === 'markdown' ? 'markdown' : 'text',
       content: normalizePreviewContent(serialized.content, entry.lineEnding, entry.hasTrailingNewline),
       path: entry.path,
@@ -1122,8 +1504,8 @@ function buildPreviewModel() {
   }
 
   return {
-    title: entry.label,
-    description: entry.path,
+    title: previewTitle,
+    description: previewDescription,
     language: entry.format === 'json' ? 'json' : entry.format === 'toml' ? 'toml' : 'text',
     content: entry.content || '',
     path: entry.path,
@@ -1146,7 +1528,13 @@ function render() {
 
   renderWorkspaceHeader();
   renderEditor();
-  schedulePreviewRender({ immediate: true });
+  syncPreviewPanelLayout();
+  if (shouldShowPreview()) {
+    schedulePreviewRender({ immediate: true });
+  } else if (elements.previewPanel) {
+    elements.previewPanel.dataset.entryId = state.selectedId || '';
+    elements.previewPanel.innerHTML = '';
+  }
   restoreRenderState(renderState);
   syncSidebarFooterMeta();
   syncActionButtons();
@@ -1155,19 +1543,29 @@ function render() {
 function renderWorkspaceHeader() {
   const entry = getSelectedEntry();
   if (!entry) {
-    elements.workspaceTitle.textContent = '尚未找到任何配置';
-    elements.workspaceSubtitle.textContent = '请先选择一个项目目录，或检查当前用户目录下是否存在相关配置文件。';
+    const hasEntries = state.entries.length > 0;
+    elements.workspaceTitle.textContent = state.projectPath
+      ? (hasEntries ? '选择一个对象开始编辑' : '当前项目还没有可编辑对象')
+      : '先选择项目目录';
+    elements.workspaceSubtitle.textContent = state.projectPath
+      ? (hasEntries
+        ? '界面只保留一个主编辑面。保存和定位都只作用于当前选中的文件。'
+        : '可以重新扫描当前目录，或切换到另一个项目目录继续。')
+      : '载入项目后，应用会自动发现 Codex CLI 与 Claude Code 的可编辑配置。';
+    renderWorkspaceEntryMeta();
     return;
   }
 
-  elements.workspaceTitle.textContent = entry.label;
+  elements.workspaceTitle.textContent = entry.navTitle || entry.label;
   const statusText = entry.error
-    ? '原文件解析失败，当前已切换为安全只读模式。'
-    : entry.exists
-      ? '已发现并载入当前文件。'
-      : '目标文件不存在，保存时会自动创建。';
-  const modeText = entry.error ? '请先修复原文件后再继续编辑。' : entry.editor ? '支持可视化编辑。' : '当前为只读预览模式。';
-  elements.workspaceSubtitle.textContent = `${statusText} ${modeText} ${entry.path}`;
+    ? '当前文件解析失败，已切换为安全只读。建议先定位原文件修复。'
+    : state.dirty
+      ? '你正在编辑当前对象；点击右上角保存即可写回当前文件。'
+      : entry.exists
+        ? '直接在中央编辑；右侧预览仅在需要确认最终写回结果时再打开。'
+        : '这个对象还不存在；做出第一次修改后保存即可创建文件。';
+  elements.workspaceSubtitle.textContent = statusText;
+  renderWorkspaceEntryMeta();
 }
 
 function renderEditor() {
@@ -1181,12 +1579,47 @@ function renderEditor() {
   };
 
   if (!entry) {
+    const hasProject = Boolean(state.projectPath);
+    const hasEntries = state.entries.length > 0;
+
     elements.editorPanel.innerHTML = `
       <div class="panel-shell panel-shell--editor panel-shell--empty">
-        <h2>当前目录还没有可编辑配置</h2>
-        <p>可以先点击上方“选择项目目录”或“重新扫描”，找到配置后这里会自动展示对应编辑器。</p>
+        <div class="editor-empty-state">
+          <div class="empty-state-icon" aria-hidden="true">
+            ${hasProject ? `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>` : `<svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>`}
+          </div>
+          <p class="empty-state-kicker">${hasProject ? '准备开始编辑' : '欢迎使用 CodeConfigHub'}</p>
+          <h2 class="empty-state-title">${hasProject ? (hasEntries ? '从左侧选择一个对象' : '当前项目没有可编辑对象') : '先选择项目目录'}</h2>
+          <p class="empty-state-description">${hasProject
+      ? (hasEntries
+        ? '侧边栏只保留可操作对象。选中后就在中央直接编辑，需要时再展开预览。'
+        : '这个项目下还没发现可编辑配置。你可以重新扫描，或者切换到另一个项目目录。')
+      : '载入项目后，应用会自动发现 Codex CLI 与 Claude Code 的配置文件，并按对象组织到左侧。'}</p>
+          <div class="empty-state-actions">
+            ${hasProject ? '' : `<button class="primary-button" type="button" data-action="choose-project">选择项目目录</button>`}
+            ${hasProject && !hasEntries ? `<button class="ghost-button" type="button" data-action="rescan">重新扫描</button>` : ''}
+          </div>
+          ${hasEntries ? `
+            <div class="empty-state-notes" aria-label="使用提示">
+              <span class="empty-state-note">左侧选对象</span>
+              <span class="empty-state-note">中央直接编辑</span>
+              <span class="empty-state-note">保存只作用于当前文件</span>
+            </div>
+          ` : ''}
+        </div>
       </div>
     `;
+
+    elements.editorPanel.onclick = async (event) => {
+      const button = event.target.closest('[data-action]');
+      if (!button) return;
+      const action = button.getAttribute('data-action');
+      if (action === 'choose-project') {
+        elements.chooseProjectButton?.click();
+      } else if (action === 'rescan') {
+        elements.rescanButton?.click();
+      }
+    };
     tagEditorShell();
     return;
   }
@@ -1220,7 +1653,7 @@ function renderEditor() {
         return;
       }
 
-      await getDesktopApi().revealFile(entry.path);
+      await revealEntryTarget(entry);
     };
     tagEditorShell(entry.id);
     return;
@@ -1273,20 +1706,49 @@ function renderEditor() {
     const button = event.target.closest('[data-action="reveal-entry-file"]');
     if (!button) {
       return;
-    }
+      }
 
-    await getDesktopApi().revealFile(entry.path);
+    await revealEntryTarget(entry);
   };
   tagEditorShell(entry.id);
 }
 
 function renderPreview() {
+  if (!shouldShowPreview()) {
+    elements.previewPanel.dataset.entryId = state.selectedId || '';
+    elements.previewPanel.innerHTML = '';
+    return;
+  }
+
   const previewEntryId = state.selectedId;
   const previewSearch = getPreviewSearchState();
   const currentPreviewScrollTop = elements.previewPanel?.querySelector('.code-block')?.scrollTop;
+  elements.previewPanel.dataset.entryId = previewEntryId || '';
+  let previewModel;
+
+  try {
+    previewModel = buildPreviewModel();
+  } catch (error) {
+    elements.previewPanel.innerHTML = `
+      <div class="panel-shell panel-shell--preview panel-shell--readonly">
+        <div class="panel-heading">
+          <div>
+            <p class="panel-kicker">预览暂不可用</p>
+            <h2>请先修正当前输入</h2>
+            <p>当前草稿里有无法序列化的值，保存前需要先修正。</p>
+          </div>
+          <span class="editor-badge editor-badge--danger">无效输入</span>
+        </div>
+        <div class="readonly-note readonly-note--danger">
+          <p>${escapeHtml(error instanceof Error ? error.message : String(error))}</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
 
   renderCodePreview(elements.previewPanel, {
-    ...buildPreviewModel(),
+    ...previewModel,
     searchQuery: previewSearch.query,
     activeMatchIndex: previewSearch.activeMatchIndex,
     scrollTop: Number.isFinite(currentPreviewScrollTop) ? currentPreviewScrollTop : previewSearch.scrollTop
@@ -1315,31 +1777,73 @@ function syncActionButtons() {
   const entry = getSelectedEntry();
   const hasBlockingParseError = Boolean(entry?.error && entry?.editor);
   const canSave = Boolean(entry && entry.editor && !hasBlockingParseError && (state.dirty || !entry.exists));
+  const showEntryActions = Boolean(entry);
+  let previewIdentity = null;
+  if (entry) {
+    try {
+      previewIdentity = getPreviewIdentityMeta(buildPreviewModel().sourceLabel);
+    } catch {
+      previewIdentity = {
+        modeLabel: '待保存结果',
+        note: '当前草稿仍有无效输入，请先修正后再查看待写入结果。'
+      };
+    }
+  }
 
+  elements.chooseProjectButton.textContent = state.projectPath ? '切换项目' : '选择项目';
   elements.saveButton.disabled = !canSave;
   elements.revealButton.disabled = !entry;
+  elements.previewToggleButton.disabled = !entry;
+
+  if (elements.workspaceEntryActionCluster) {
+    elements.workspaceEntryActionCluster.hidden = !showEntryActions;
+  }
+
+  if (elements.workspaceToolbarDivider) {
+    elements.workspaceToolbarDivider.hidden = !showEntryActions;
+  }
+
+  elements.previewToggleButton.setAttribute('aria-expanded', shouldShowPreview() ? 'true' : 'false');
+  elements.previewToggleButton.setAttribute('aria-pressed', shouldShowPreview() ? 'true' : 'false');
+  elements.previewToggleButton.title = !entry
+    ? '先从左侧选择一个配置对象'
+    : shouldShowPreview()
+      ? '收起右侧预览'
+      : previewIdentity?.note || '展开右侧预览';
+  elements.previewToggleButton.textContent = !entry
+    ? '预览'
+    : shouldShowPreview()
+      ? '收起预览'
+      : '打开预览';
+  elements.revealButton.textContent = !entry
+    ? '定位文件'
+    : entry.exists
+      ? '定位文件'
+      : '查看创建位置';
+  elements.revealButton.title = entry?.revealHint || '定位当前条目';
 
   if (!entry || !entry.editor) {
-    elements.saveButton.textContent = '保存当前文件';
+    elements.saveButton.textContent = '保存';
     return;
   }
 
   if (hasBlockingParseError) {
-    elements.saveButton.textContent = '请先修复解析错误';
+    elements.saveButton.textContent = '修复后保存';
     return;
   }
 
   if (!entry.exists) {
-    elements.saveButton.textContent = '创建当前文件';
+    elements.saveButton.textContent = state.dirty ? '创建并保存' : '创建文件';
     return;
   }
 
-  elements.saveButton.textContent = state.dirty ? '保存当前文件 *' : '当前无变更';
+  elements.saveButton.textContent = state.dirty ? '保存更改' : '已保存';
 }
 
 function handleDraftChange(nextDraft) {
   state.draft = nextDraft;
   state.dirty = true;
+  renderWorkspaceHeader();
   schedulePreviewRender();
   syncActionButtons();
 }
@@ -1485,5 +1989,7 @@ async function checkForUpdates(isManual = false) {
     }
   }
 }
+
+
 
 
