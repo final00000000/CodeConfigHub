@@ -17,7 +17,6 @@
       <header class="workspace-topbar">
         <div class="workspace-context">
           <div class="workspace-heading">
-            <p class="workspace-kicker">配置编辑器</p>
             <h1 id="workspace-title">选择配置对象并开始修改</h1>
             <p id="workspace-subtitle">左侧选对象，中央直接编辑；预览只在需要时展开。</p>
           </div>
@@ -27,17 +26,28 @@
 
         <div class="workspace-toolbar" aria-label="工作区操作">
           <div class="workspace-action-cluster workspace-action-cluster--global">
-            <span class="workspace-action-cluster__label">项目范围</span>
             <div id="workspace-global-actions" class="workspace-actions workspace-global-actions" role="group" aria-label="全局操作">
               <button id="choose-project-btn" class="ghost-button" type="button">选择项目目录</button>
               <button id="rescan-btn" class="ghost-button" type="button">重新扫描</button>
             </div>
           </div>
 
+          <div class="workspace-action-cluster workspace-action-cluster--schema">
+            <div class="workspace-setting-control">
+              <label class="workspace-setting-control__label" for="schema-auto-refresh-select">自动拉取</label>
+              <select id="schema-auto-refresh-select" class="select-input workspace-setting-control__select" aria-label="Schema 自动拉取频率">
+                <option value="0">手动</option>
+                <option value="43200000">12 小时</option>
+                <option value="86400000">1 天</option>
+                <option value="259200000">3 天</option>
+                <option value="432000000">5 天</option>
+              </select>
+            </div>
+          </div>
+
           <span id="workspace-toolbar-divider" class="workspace-toolbar__divider" aria-hidden="true"></span>
 
           <div id="workspace-entry-action-cluster" class="workspace-action-cluster workspace-action-cluster--entry">
-            <span class="workspace-action-cluster__label">当前文件</span>
             <div id="workspace-entry-actions" class="workspace-actions workspace-entry-actions" role="group" aria-label="当前文件操作">
               <button id="preview-toggle-btn" class="ghost-button" type="button" aria-controls="preview-panel" aria-expanded="false">打开预览</button>
               <button id="reveal-btn" class="ghost-button" type="button">定位文件</button>

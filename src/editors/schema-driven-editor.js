@@ -164,6 +164,93 @@ function getDefaultOpenGroupKeys(groups = []) {
   return defaults.length > 0 ? defaults : groups.slice(0, 1).map((group) => group.key);
 }
 
+function createClusterStateKey(groupKey = '', collectionKey = '') {
+  return `${String(groupKey || '__root__')}::${String(collectionKey || '__default__')}`;
+}
+
+function getDefaultOpenClusterKeys(groups = []) {
+  const keys = [];
+
+  groups.forEach((group) => {
+    const layout = createGroupFieldLayout(group);
+    if (!layout.shouldNest) {
+      return;
+    }
+
+    if (layout.directFields.length > 0) {
+      keys.push(createClusterStateKey(group.key, '__direct__'));
+    }
+
+    layout.nestedGroups.forEach((nestedGroup, index) => {
+      if (layout.nestedGroups.length <= 2 || index === 0 || nestedGroup.fields.length <= 3) {
+        keys.push(createClusterStateKey(group.key, nestedGroup.key));
+      }
+    });
+  });
+
+  return keys;
+}
+
+function getAvailableClusterStateKeys(groups = []) {
+  const keys = [];
+
+  groups.forEach((group) => {
+    const layout = createGroupFieldLayout(group);
+    if (!layout.shouldNest) {
+      return;
+    }
+
+    if (layout.directFields.length > 0) {
+      keys.push(createClusterStateKey(group.key, '__direct__'));
+    }
+
+    layout.nestedGroups.forEach((nestedGroup) => {
+      keys.push(createClusterStateKey(group.key, nestedGroup.key));
+    });
+  });
+
+  return keys;
+}
+
+function getOrderedClusterStateKeysForGroup(group = {}) {
+  const layout = createGroupFieldLayout(group);
+  if (!layout.shouldNest) {
+    return [];
+  }
+
+  return [
+    ...(layout.directFields.length > 0 ? [createClusterStateKey(group.key, '__direct__')] : []),
+    ...layout.nestedGroups.map((nestedGroup) => createClusterStateKey(group.key, nestedGroup.key))
+  ];
+}
+
+function normalizeAccordionGroupKeys(groups = [], openKeys = []) {
+  const availableKeys = groups
+    .map((group) => group.key)
+    .filter(Boolean);
+
+  if (availableKeys.length === 0) {
+    return [];
+  }
+
+  const preferredKey = (openKeys || []).find((key) => availableKeys.includes(key));
+  return preferredKey ? [preferredKey] : availableKeys.slice(0, 1);
+}
+
+function normalizeAccordionClusterKeys(groups = [], openClusterKeys = []) {
+  const preferredSet = new Set((openClusterKeys || []).filter(Boolean));
+
+  return groups.flatMap((group) => {
+    const orderedKeys = getOrderedClusterStateKeysForGroup(group);
+    if (orderedKeys.length === 0) {
+      return [];
+    }
+
+    const matchedKey = orderedKeys.find((key) => preferredSet.has(key));
+    return matchedKey ? [matchedKey] : [];
+  });
+}
+
 function readSchemaUiState(container, entryId) {
   if (!container.dataset.schemaDrivenUiState) {
     return null;
@@ -181,6 +268,7 @@ function writeSchemaUiState(container, entryId, state) {
   container.dataset.schemaDrivenUiState = JSON.stringify({
     entryId,
     openKeys: Array.isArray(state?.openKeys) ? state.openKeys.filter(Boolean) : [],
+    openClusterKeys: Array.isArray(state?.openClusterKeys) ? state.openClusterKeys.filter(Boolean) : [],
     activeGroupKey: state?.activeGroupKey || '',
     activeTab: state?.activeTab || 'quick',
     searchQuery: state?.searchQuery || '',
@@ -463,6 +551,71 @@ function renderCategoryBanner({ activeTab = 'all', tabs = [], visibleGroups = []
   `;
 }
 
+function renderSearchResultsBanner({
+  searchQuery = '',
+  visibleGroups = [],
+  visibleFieldCount = 0,
+  totalFieldCount = 0,
+  tone = 'codex'
+} = {}) {
+  return `
+    <section class="search-results-banner search-results-banner--${tone}" role="status" aria-live="polite">
+      <div class="search-results-banner__copy">
+        <strong>搜索结果</strong>
+        <span>已在全部分类中匹配 “${escapeHtml(searchQuery)}”。</span>
+      </div>
+      <div class="search-results-banner__meta">
+        <span class="search-results-banner__pill">${visibleGroups.length} 组</span>
+        <span class="search-results-banner__pill">${visibleFieldCount}/${totalFieldCount} 项</span>
+      </div>
+    </section>
+  `;
+}
+
+function renderGroupOutline({
+  visibleGroups = [],
+  activeGroupKey = '',
+  tone = 'codex',
+  searchQuery = ''
+} = {}) {
+  if (!Array.isArray(visibleGroups) || visibleGroups.length <= (searchQuery ? 1 : 3)) {
+    return '';
+  }
+
+  const eyebrow = searchQuery ? '命中分组' : '本页分组';
+  const description = searchQuery
+    ? '先跳到命中的组，再看展开详情。'
+    : '同层默认单开；如果这一层还很多，可以先跳到目标分组。';
+
+  return `
+    <section class="group-outline group-outline--${tone}" aria-label="分组导航">
+      <div class="group-outline__header">
+        <div class="group-outline__copy">
+          <p class="group-outline__eyebrow">${eyebrow}</p>
+          <h3>组内快速定位</h3>
+          <p>${description}</p>
+        </div>
+        <span class="group-outline__summary">${visibleGroups.length} 组 · 单开</span>
+      </div>
+      <div class="group-outline__chips" role="navigation" aria-label="跳转到分组">
+        ${visibleGroups.map((group, index) => `
+          <button
+            class="group-outline-chip ${group.key === activeGroupKey ? 'is-active' : ''}"
+            type="button"
+            data-action="jump-schema-group"
+            data-group-key="${escapeHtml(group.key)}"
+            data-group-anchor-id="${escapeHtml(createGroupAnchorId(group.key, index))}"
+            aria-pressed="${group.key === activeGroupKey ? 'true' : 'false'}"
+          >
+            <span class="group-outline-chip__title">${escapeHtml(group.title)}</span>
+            <span class="group-outline-chip__count">${group.fields.length}</span>
+          </button>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function renderEditorToolbar({
   entry,
   tone = 'codex',
@@ -478,6 +631,7 @@ function renderEditorToolbar({
 } = {}) {
   const activeTabMeta = tabs.find((tab) => tab.id === activeTab);
   const assistantTitle = tone === 'claude' ? 'Claude 可视化配置' : 'Codex 可视化配置';
+  const pathLabel = entry.compactPath || entry.path || '';
   const helperCopy = searchQuery
     ? `正在全局搜索字段，当前命中 ${visibleFieldCount} 项。`
     : activeTab === 'quick'
@@ -488,11 +642,9 @@ function renderEditorToolbar({
     <header class="editor-toolbar editor-toolbar--${tone}" role="banner">
       <div class="editor-toolbar__brand">
         <div class="editor-toolbar__brand-main">
-          <p class="editor-toolbar__kicker">${assistantTitle}</p>
           <div class="editor-toolbar__title-row">
             <h2>${escapeHtml(entry.navTitle || entry.label)}</h2>
           </div>
-          <p class="editor-toolbar__summary">${escapeHtml(helperCopy)}</p>
           <div class="editor-toolbar__meta">
             <span class="editor-badge editor-badge--${tone}">${entry.exists ? '当前对象' : '待创建'}</span>
             <span class="status-pill ${statusTone}">${escapeHtml(formatSchemaSourceLabel(summary))}</span>
@@ -503,7 +655,6 @@ function renderEditorToolbar({
       </div>
 
       <div class="editor-toolbar__search-panel">
-        <label class="editor-toolbar__search-label" for="schema-toolbar-search-input">搜索字段</label>
         <div class="editor-toolbar__search">
           <input
             id="schema-toolbar-search-input"
@@ -522,7 +673,7 @@ function renderEditorToolbar({
       </div>
 
       <div class="editor-toolbar__actions">
-        ${onRefreshOfficialSchema ? `<button class="secondary-button${isRefreshingOfficialSchema ? ' is-loading' : ''}" type="button" data-action="refresh-official-schema" ${isRefreshingOfficialSchema ? 'disabled' : ''} aria-label="刷新官方 Schema">${isRefreshingOfficialSchema ? '刷新中…' : '刷新 Schema'}</button>` : ''}
+        ${onRefreshOfficialSchema ? `<button class="ghost-button${isRefreshingOfficialSchema ? ' is-loading' : ''}" type="button" data-action="refresh-official-schema" ${isRefreshingOfficialSchema ? 'disabled' : ''} aria-label="刷新官方 Schema">${isRefreshingOfficialSchema ? '刷新中…' : '刷新 Schema'}</button>` : ''}
         <button class="primary-button editor-toolbar__primary" type="button" data-action="open-add-field-modal" aria-label="新建字段">
           <span aria-hidden="true">+</span> 新建字段
         </button>
@@ -681,17 +832,11 @@ function isNestedCollectionFriendlyGroup(groupKey = '') {
 }
 
 function buildNestedCollectionHint(fields = []) {
-  const leafTitles = [...new Set(
-    fields
-      .map(({ field }) => String(field?.title || field?.actualPath || '').trim())
-      .filter(Boolean)
-  )];
-
-  if (leafTitles.length === 0) {
-    return '同一对象的字段已经收在一起，改起来不容易串组。';
+  if (!fields.length) {
+    return '单独展开查看。';
   }
 
-  return `包含 ${leafTitles.slice(0, 3).join(' / ')}${leafTitles.length > 3 ? ' 等字段' : ''}`;
+  return `共 ${fields.length} 项，单独展开查看。`;
 }
 
 function createGroupFieldLayout(group = {}) {
@@ -742,9 +887,18 @@ function createGroupFieldLayout(group = {}) {
 }
 
 function renderGroupOverview(stats, layout, tone = 'codex') {
+  const shouldRenderOverview = layout.shouldNest
+    || stats.totalCount >= 6
+    || stats.localCount > 0
+    || stats.structuredCount >= 2;
+
+  if (!shouldRenderOverview) {
+    return '';
+  }
+
   const overviewItems = [
     { label: '字段', value: `${stats.totalCount} 项` },
-    layout.shouldNest ? { label: '子组', value: `${layout.nestedGroups.length} 组` } : null,
+    layout.shouldNest ? { label: '分块', value: `${layout.nestedGroups.length + (layout.directFields.length > 0 ? 1 : 0)} 块` } : null,
     stats.officialCount > 0 ? { label: '官方', value: `${stats.officialCount} 项` } : null,
     stats.localCount > 0 ? { label: '本地', value: `${stats.localCount} 项` } : null,
     stats.structuredCount > 0 ? { label: '结构', value: `${stats.structuredCount} 项` } : null
@@ -762,38 +916,151 @@ function renderGroupOverview(stats, layout, tone = 'codex') {
   `;
 }
 
-function renderNestedCollection(collection, tone = 'codex', variant = 'nested') {
+function buildPreviewLabels(values = []) {
+  return [...new Set(
+    values
+      .map((value) => String(value || '').trim())
+      .filter(Boolean)
+  )];
+}
+
+function getFieldPreviewLabels(fields = []) {
+  return buildPreviewLabels(
+    fields.map(({ field }) => field?.title || field?.actualPath || '')
+  );
+}
+
+function renderPreviewChips(labels = [], maxVisible = 3) {
+  if (!Array.isArray(labels) || labels.length === 0) {
+    return '';
+  }
+
+  const visibleLabels = labels.slice(0, maxVisible);
+  const overflowCount = Math.max(0, labels.length - visibleLabels.length);
+
   return `
-    <section class="group-cluster group-cluster--${tone} group-cluster--${variant}">
-      <div class="group-cluster__header">
-        <div class="group-cluster__copy">
-          <p class="group-cluster__eyebrow">${escapeHtml(collection.eyebrow)}</p>
-          <h4>${escapeHtml(collection.title)}</h4>
-          <p>${escapeHtml(collection.hint)}</p>
-        </div>
-        <div class="group-cluster__meta">
-          ${collection.pathLabel ? `<code class="group-cluster__path">${escapeHtml(collection.pathLabel)}</code>` : ''}
-          <span class="group-cluster__count">${collection.fields.length} 项</span>
-        </div>
-      </div>
-      <div class="group-cluster__fields">
-        ${collection.fields.map(({ field, index }) => renderField(field, index)).join('')}
-      </div>
-    </section>
+    <div class="preview-chip-row">
+      ${visibleLabels.map((label) => `<span class="preview-chip">${escapeHtml(label)}</span>`).join('')}
+      ${overflowCount > 0 ? `<span class="preview-chip preview-chip--overflow">+${overflowCount}</span>` : ''}
+    </div>
   `;
 }
 
-function renderSchemaGroup(group, tone, position, isOpen) {
+function buildNestedCollectionPreview(fields = []) {
+  return getFieldPreviewLabels(fields);
+}
+
+function buildGroupPreviewLabels(group, layout) {
+  if (layout.shouldNest) {
+    return buildPreviewLabels([
+      ...(layout.directFields.length > 0 ? ['基础项'] : []),
+      ...layout.nestedGroups.map((nestedGroup) => nestedGroup.title)
+    ]);
+  }
+
+  return getFieldPreviewLabels(group.fields);
+}
+
+function summarizeCollectionFields(fields = []) {
+  const list = Array.isArray(fields) ? fields : [];
+
+  return {
+    customCount: list.filter(({ field }) => !field?.isOfficial).length,
+    structuredCount: list.filter(({ field }) => isStructuredField(field)).length
+  };
+}
+
+function renderCollectionSummaryPills(summary = {}) {
+  const items = [
+    summary.customCount > 0 ? { label: `${summary.customCount} 自定义`, tone: 'custom' } : null,
+    summary.structuredCount > 0 ? { label: `${summary.structuredCount} 结构`, tone: 'structured' } : null
+  ].filter(Boolean);
+
+  if (items.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="group-cluster__summary-pills">
+      ${items.map((item) => `<span class="group-cluster__summary-pill group-cluster__summary-pill--${item.tone}">${escapeHtml(item.label)}</span>`).join('')}
+    </div>
+  `;
+}
+
+function renderNestedCollection(collection, tone = 'codex', variant = 'nested', isOpen = false, stateKey = '') {
+  const previewLabels = buildNestedCollectionPreview(collection.fields);
+  const variantLabel = variant === 'direct' ? '基础块' : '分组块';
+  const useCompactLayout = shouldUseCompactCollectionLayout(collection);
+  const collectionSummary = summarizeCollectionFields(collection.fields);
+
+  return `
+    <details
+      class="group-cluster group-cluster--${tone} group-cluster--${variant}${useCompactLayout ? ' group-cluster--compact' : ''}"
+      data-cluster-key="${escapeHtml(stateKey)}"
+      ${isOpen ? 'open' : ''}
+    >
+      <summary class="group-cluster__summary">
+        <div class="group-cluster__header">
+          <div class="group-cluster__copy">
+            <div class="group-cluster__eyebrow-row">
+              <p class="group-cluster__eyebrow">${escapeHtml(collection.eyebrow)}</p>
+              <span class="group-cluster__tag">${escapeHtml(variantLabel)}</span>
+            </div>
+            <h4>${escapeHtml(collection.title)}</h4>
+            ${useCompactLayout ? `
+              <div class="group-cluster__support">
+                ${collection.pathLabel ? `
+                  <div class="group-cluster__support-row">
+                    <span class="group-cluster__support-label">前缀</span>
+                    <code class="group-cluster__path group-cluster__path--inline" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
+                  </div>
+                ` : ''}
+                ${renderCollectionSummaryPills(collectionSummary)}
+              </div>
+            ` : `
+              <p class="group-cluster__hint">${escapeHtml(collection.hint)}</p>
+              ${renderPreviewChips(previewLabels, 3)}
+            `}
+          </div>
+          <div class="group-cluster__meta">
+            ${!useCompactLayout && collection.pathLabel ? `
+              <div class="group-cluster__meta-panel">
+                <span class="group-cluster__meta-label">字段前缀</span>
+                <code class="group-cluster__path" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
+              </div>
+            ` : ''}
+            <div class="group-cluster__meta-row">
+              <span class="group-cluster__count">${collection.fields.length} 项</span>
+              <span class="group-cluster__chevron" aria-hidden="true">⌄</span>
+            </div>
+          </div>
+        </div>
+      </summary>
+      <div class="group-cluster__body">
+        <div class="group-cluster__fields">
+          ${renderFieldList(collection.fields, {
+    compact: useCompactLayout,
+    pathPrefix: collection.pathLabel || ''
+  })}
+        </div>
+      </div>
+    </details>
+  `;
+}
+
+function renderSchemaGroup(group, tone, position, isOpen, openClusterKeySet = new Set()) {
   const stats = summarizeGroup(group);
   const layout = createGroupFieldLayout(group);
   const anchorId = createGroupAnchorId(group.key, position);
+  const previewLabels = buildGroupPreviewLabels(group, layout);
   const hint = layout.shouldNest
-    ? `已按${layout.nestedCollectionLabel}拆开，展开后更容易确认每一组字段。`
+    ? `已按 ${layout.nestedCollectionLabel} 分块；同层默认单开，一次只看一块更清楚。`
     : stats.officialCount > 0
-      ? `${stats.officialCount} 项带官方说明`
+      ? `${stats.officialCount} 项带官方说明。`
       : stats.structuredCount > 0
-        ? `含 ${stats.structuredCount} 项结构字段`
-        : '这一组可以直接改值';
+        ? `含 ${stats.structuredCount} 项结构字段。`
+        : '这一组可以直接编辑。';
+  const eyebrow = layout.shouldNest ? layout.nestedCollectionLabel : '字段组';
 
   return `
     <details
@@ -804,11 +1071,13 @@ function renderSchemaGroup(group, tone, position, isOpen) {
     >
       <summary class="group-card__header">
         <div class="group-card__header-copy">
+          <p class="group-card__eyebrow">${escapeHtml(eyebrow)}</p>
           <h3>${escapeHtml(group.title)}</h3>
-          <p>${escapeHtml(hint)}</p>
+          <p class="group-card__hint">${escapeHtml(hint)}</p>
+          ${renderPreviewChips(previewLabels, 4)}
         </div>
         <span class="group-card__meta">
-          ${layout.shouldNest ? `<span class="group-card__cluster-count">${layout.nestedGroups.length} 组</span>` : ''}
+          ${layout.shouldNest ? `<span class="group-card__cluster-count">${layout.nestedGroups.length + (layout.directFields.length > 0 ? 1 : 0)} 块</span>` : ''}
           <span class="group-card__count">${stats.totalCount} 项</span>
           <span class="group-card__chevron" aria-hidden="true">⌄</span>
         </span>
@@ -819,19 +1088,21 @@ function renderSchemaGroup(group, tone, position, isOpen) {
           ${layout.directFields.length > 0 ? renderNestedCollection({
     eyebrow: '直接字段',
     title: '基础项',
-    hint: '这些字段直接挂在当前分组下，不属于某个具体子对象。',
+    hint: '挂在当前分组下，单独看更清楚。',
     pathLabel: group.key === '__root__' ? '' : group.key,
     fields: layout.directFields
-  }, tone, 'direct') : ''}
+  }, tone, 'direct', openClusterKeySet.has(createClusterStateKey(group.key, '__direct__')), createClusterStateKey(group.key, '__direct__')) : ''}
           <div class="group-card__clusters">
             ${layout.nestedGroups.map((nestedGroup) => renderNestedCollection({
     ...nestedGroup,
     eyebrow: layout.nestedCollectionLabel
-  }, tone, 'nested')).join('')}
+  }, tone, 'nested', openClusterKeySet.has(createClusterStateKey(group.key, nestedGroup.key)), createClusterStateKey(group.key, nestedGroup.key))).join('')}
           </div>
         ` : `
           <div class="group-card__fields">
-            ${group.fields.map(({ field, index }) => renderField(field, index)).join('')}
+            ${renderFieldList(group.fields, {
+    pathPrefix: group.key === '__root__' ? '' : group.key
+  })}
           </div>
         `}
       </div>
@@ -869,11 +1140,32 @@ function shortenFieldDescription(value = '', maxLength = 48) {
     return '';
   }
 
-  if (normalized.length <= maxLength) {
+  const normalizedMaxLength = Math.max(120, maxLength);
+
+  if (normalized.length <= normalizedMaxLength) {
     return normalized;
   }
 
-  return `${normalized.slice(0, maxLength).trimEnd()}…`;
+  return `${normalized.slice(0, normalizedMaxLength).trimEnd()}…`;
+}
+
+function getFieldTypeLabel(type = '') {
+  switch (String(type || '').toLowerCase()) {
+    case 'boolean':
+      return '布尔';
+    case 'integer':
+      return '整数';
+    case 'number':
+      return '数字';
+    case 'array':
+      return '数组';
+    case 'object':
+      return '对象';
+    case 'null':
+      return 'Null';
+    default:
+      return '文本';
+  }
 }
 
 function getFieldPrimaryTone(field = {}) {
@@ -999,9 +1291,73 @@ function getFieldNoteCopy(field = {}) {
   return '';
 }
 
-function getFieldMetaPresentation(field = {}) {
+function getRelativeFieldPath(actualPath = '', pathPrefix = '') {
+  const normalizedPath = normalizeDraftFieldPath(actualPath);
+  const normalizedPrefix = normalizeDraftFieldPath(pathPrefix);
+
+  if (!normalizedPath) {
+    return '';
+  }
+
+  if (!normalizedPrefix) {
+    return normalizedPath;
+  }
+
+  if (normalizedPath === normalizedPrefix) {
+    return '';
+  }
+
+  return normalizedPath.startsWith(`${normalizedPrefix}.`)
+    ? normalizedPath.slice(normalizedPrefix.length + 1)
+    : normalizedPath;
+}
+
+function getPathLeafSegment(value = '') {
+  return String(value || '')
+    .split('.')
+    .filter(Boolean)
+    .at(-1) || '';
+}
+
+function normalizeFieldCompareToken(value = '') {
+  return String(value || '')
+    .toLocaleLowerCase()
+    .replace(/[\s._/-]+/g, '');
+}
+
+function shouldHideCompactFieldPath(pathLabel = '', title = '') {
+  const normalizedTitle = normalizeFieldCompareToken(title);
+  if (!normalizedTitle) {
+    return false;
+  }
+
+  const normalizedPath = normalizeFieldCompareToken(pathLabel);
+  const normalizedLeaf = normalizeFieldCompareToken(getPathLeafSegment(pathLabel));
+
+  return normalizedTitle === normalizedPath || normalizedTitle === normalizedLeaf;
+}
+
+function shouldShowFieldNote(noteCopy = '', { compact = false } = {}) {
+  if (!noteCopy) {
+    return false;
+  }
+
+  if (noteCopy === '本地扩展字段，保存时会原样回写。') {
+    return false;
+  }
+
+  return true;
+}
+
+function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = '' } = {}) {
   const tone = getFieldPrimaryTone(field);
   const badges = [];
+  const typeLabel = getFieldTypeLabel(field.type || field.schemaType || 'string');
+
+  badges.push(renderFieldBadge(
+    typeLabel,
+    field.type === 'array' || field.type === 'object' ? 'structured' : 'official'
+  ));
 
   if (tone === 'danger') {
     badges.push(renderFieldBadge('高风险', 'danger'));
@@ -1019,36 +1375,71 @@ function getFieldMetaPresentation(field = {}) {
 
   if (!field.isOfficial) {
     badges.push(renderFieldBadge('自定义', 'custom'));
-  } else {
-    badges.push(renderFieldBadge('官方', 'official'));
   }
 
-  if (field.type === 'array' || field.type === 'object') {
-    badges.push(renderFieldBadge('结构', 'structured'));
-  }
-
-  const pathChip = field.actualPath
-    ? `<span class="field-path-chip">${escapeHtml(field.actualPath)}</span>`
+  const pathLabel = getRelativeFieldPath(field.actualPath, pathPrefix);
+  const shouldRenderPath = Boolean(pathLabel) && !(compact && shouldHideCompactFieldPath(pathLabel, field.title));
+  const pathChip = shouldRenderPath
+    ? `<code class="field-path-chip" title="${escapeHtml(field.actualPath)}">${escapeHtml(pathLabel)}</code>`
     : '';
   const noteCopy = getFieldNoteCopy(field);
-  const detailsHtml = `
-    <span class="field-detail-line">
-      ${pathChip}
-    </span>
-    ${noteCopy ? `<span class="field-note-line field-note-line--${tone}">${escapeHtml(noteCopy)}</span>` : ''}
-  `;
+  const showNote = shouldShowFieldNote(noteCopy, { compact });
+  const detailsHtml = pathChip || showNote
+    ? `
+      <span class="field-meta-stack">
+        ${pathChip ? `<span class="field-detail-line field-detail-line--path"><span class="field-detail-label">路径</span>${pathChip}</span>` : ''}
+        ${showNote ? `<span class="field-note-line field-note-line--${tone}"><span class="field-detail-label">提醒</span><span class="field-note-text">${escapeHtml(noteCopy)}</span></span>` : ''}
+      </span>
+    `
+    : '';
 
   return {
     tone,
-    labelMeta: `<span class="field-label-meta">${badges.join('')}</span>`,
+    labelMeta: badges.length > 0 ? `<span class="field-label-meta">${badges.join('')}</span>` : '',
     description: getFieldSummaryCopy(field),
     detailsHtml
   };
 }
 
-function renderField(field, index) {
-  const meta = getFieldMetaPresentation(field);
-  const fieldAttributes = { class: `schema-field-card schema-field-card--${meta.tone}` };
+function isStructuredField(field = {}) {
+  return field.type === 'array' || field.type === 'object';
+}
+
+function shouldUseCompactCollectionLayout(collection = {}) {
+  const fields = Array.isArray(collection.fields) ? collection.fields : [];
+  if (fields.length < 3) {
+    return false;
+  }
+
+  const context = [
+    collection.eyebrow,
+    collection.title,
+    collection.pathLabel
+  ].filter(Boolean).join(' ').toLowerCase();
+  const structuredCount = fields.filter(({ field }) => isStructuredField(field)).length;
+  const primitiveCount = fields.length - structuredCount;
+
+  return /mcp|server|provider|profile/.test(context)
+    || (fields.length >= 4 && primitiveCount >= 3 && structuredCount <= 1);
+}
+
+function renderFieldList(fields = [], { compact = false, pathPrefix = '' } = {}) {
+  if (!Array.isArray(fields) || fields.length === 0) {
+    return '';
+  }
+
+  return `
+    <div class="schema-field-list ${compact ? 'schema-field-list--compact' : ''}">
+      ${fields.map(({ field, index }) => renderField(field, index, { compact, pathPrefix })).join('')}
+    </div>
+  `;
+}
+
+function renderField(field, index, { compact = false, pathPrefix = '' } = {}) {
+  const meta = getFieldMetaPresentation(field, { compact, pathPrefix });
+  const fieldAttributes = {
+    class: `schema-field-card schema-field-card--${meta.tone}${compact ? ' schema-field-card--compact' : ''}`
+  };
 
   if (field.type === 'boolean') {
     return renderSelect({
@@ -1150,6 +1541,94 @@ function renderSchemaSyncNote(summary = {}) {
   `;
 }
 
+function renderEditorFooterStat(label, value, tone = 'neutral') {
+  return `
+    <div class="editor-footer-stat editor-footer-stat--${tone}">
+      <strong>${escapeHtml(value)}</strong>
+      <span>${escapeHtml(label)}</span>
+    </div>
+  `;
+}
+
+function renderEditorFooter({
+  summary = {},
+  entry = {},
+  tone = 'codex',
+  statusTone = 'is-muted',
+  fieldCount = 0
+} = {}) {
+  const sourceLabel = formatSchemaSourceLabel(summary);
+  const matchedCount = summary.matchedOfficialCount || 0;
+  const localOnlyCount = summary.localOnlyCount ?? Math.max(0, fieldCount - matchedCount);
+  const pathLabel = entry.compactPath || entry.path || '';
+  const hintCopy = entry.creationHint || entry.statusHint || entry.description || '';
+  const syncDescription = summary.available
+    ? '这里集中看字段匹配、Schema 来源和回写目标文件。'
+    : '当前仍按本地字段结构推断，但保存时会正常回写。';
+
+  return `
+    <details class="editor-footer editor-footer--${tone}">
+      <summary class="editor-footer__summary">
+        <div class="editor-footer__summary-main">
+          <p class="editor-footer__eyebrow">底部信息</p>
+          <div class="editor-footer__summary-copy">
+            <strong>同步与回写信息</strong>
+            <span>不用离开编辑区，也能确认来源、字段统计和目标文件。</span>
+          </div>
+        </div>
+        <div class="editor-footer__summary-meta">
+          <span class="editor-footer__summary-pill">${fieldCount} 项</span>
+          <span class="editor-footer__summary-pill editor-footer__summary-pill--${tone}">${escapeHtml(sourceLabel)}</span>
+          <span class="editor-footer__chevron" aria-hidden="true">⌄</span>
+        </div>
+      </summary>
+      <div class="editor-footer__content">
+        <div class="editor-footer__grid">
+          <section class="editor-footer-card">
+            <div class="editor-footer-card__header">
+              <div>
+                <p class="editor-footer-card__eyebrow">字段概览</p>
+                <h4>当前映射情况</h4>
+              </div>
+            </div>
+            <div class="editor-footer-stats">
+              ${renderEditorFooterStat('当前字段', `${fieldCount}`, 'neutral')}
+              ${renderEditorFooterStat('匹配官方', `${matchedCount}`, tone)}
+              ${renderEditorFooterStat('本地扩展', `${localOnlyCount}`, localOnlyCount > 0 ? 'custom' : 'neutral')}
+            </div>
+          </section>
+
+          <section class="editor-footer-card editor-footer-card--${tone}">
+            <div class="editor-footer-card__header">
+              <div>
+                <p class="editor-footer-card__eyebrow">同步状态</p>
+                <h4>${escapeHtml(sourceLabel)}</h4>
+              </div>
+            </div>
+            <div class="editor-footer__meta">
+              <span class="status-pill ${statusTone}">${escapeHtml(sourceLabel)}</span>
+              ${summary.fetchedAt ? `<span class="status-pill is-muted">${escapeHtml(formatSchemaFetchedAt(summary.fetchedAt))}</span>` : ''}
+            </div>
+            <p class="editor-footer__hint">${escapeHtml(syncDescription)}</p>
+          </section>
+
+          <section class="editor-footer-card editor-footer-card--path">
+            <div class="editor-footer-card__header">
+              <div>
+                <p class="editor-footer-card__eyebrow">目标文件</p>
+                <h4>保存落点</h4>
+              </div>
+            </div>
+            <code class="editor-footer__path" title="${escapeHtml(entry.path || pathLabel)}">${escapeHtml(pathLabel || '未解析到文件路径')}</code>
+            ${hintCopy ? `<p class="editor-footer__hint">${escapeHtml(hintCopy)}</p>` : '<p class="editor-footer__hint">当前保存会写回这份配置文件；如果文件不存在，会按对象类型尝试创建。</p>'}
+          </section>
+        </div>
+        ${renderSchemaSyncNote(summary)}
+      </div>
+    </details>
+  `;
+}
+
 function groupFields(fields = []) {
   const groups = new Map();
 
@@ -1193,13 +1672,29 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
   const quickSuggestionFields = (currentDraft.starterSuggestions || [])
     .filter((field) => !quickFieldItems.some((item) => item.field.actualPath === field.actualPath))
     .slice(0, 6);
-  const defaultOpenKeys = getDefaultOpenGroupKeys(baseGroups);
+  const defaultOpenKeys = normalizeAccordionGroupKeys(visibleGroups, getDefaultOpenGroupKeys(visibleGroups));
+  const defaultOpenClusterKeys = normalizeAccordionClusterKeys(visibleGroups, getDefaultOpenClusterKeys(visibleGroups));
+  const availableGroupKeys = new Set(visibleGroups.map((group) => group.key));
+  const availableClusterKeys = new Set(getAvailableClusterStateKeys(visibleGroups));
+  const storedOpenKeys = Array.isArray(storedUiState?.openKeys)
+    ? storedUiState.openKeys.filter((key) => availableGroupKeys.has(key))
+    : [];
+  const storedOpenClusterKeys = Array.isArray(storedUiState?.openClusterKeys)
+    ? storedUiState.openClusterKeys.filter((key) => availableClusterKeys.has(key))
+    : [];
   const openGroupKeySet = new Set(
-    Array.isArray(storedUiState?.openKeys) && storedUiState.openKeys.length > 0
-      ? storedUiState.openKeys
+    storedOpenKeys.length > 0
+      ? normalizeAccordionGroupKeys(visibleGroups, storedOpenKeys)
       : defaultOpenKeys
   );
-  const initialActiveGroupKey = visibleGroups[0]?.key || '';
+  const openClusterKeySet = new Set(
+    storedOpenClusterKeys.length > 0
+      ? normalizeAccordionClusterKeys(visibleGroups, storedOpenClusterKeys)
+      : defaultOpenClusterKeys
+  );
+  const initialActiveGroupKey = visibleGroups.some((group) => group.key === storedUiState?.activeGroupKey)
+    ? storedUiState.activeGroupKey
+    : (visibleGroups[0]?.key || '');
 
   container.innerHTML = `
     <div class="panel-shell panel-shell--editor-v2">
@@ -1220,12 +1715,24 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
       ${renderSchemaTabs(tabs, activeTab, tone)}
 
       <main id="schema-view-panel" class="editor-content" role="main">
-        ${searchQuery ? `
-          <div class="search-results-banner" role="status" aria-live="polite">
-            <strong>搜索结果</strong>
-            <span>已在全部分类中匹配 “${escapeHtml(searchQuery)}”。</span>
-          </div>
-        ` : renderCategoryBanner({ activeTab, tabs, visibleGroups, tone })}
+        ${searchQuery
+    ? renderSearchResultsBanner({
+      searchQuery,
+      visibleGroups,
+      visibleFieldCount: filteredView.visibleFieldCount,
+      totalFieldCount: filteredView.totalFieldCount,
+      tone
+    })
+    : renderCategoryBanner({ activeTab, tabs, visibleGroups, tone })}
+
+        ${searchQuery || activeTab !== 'quick'
+    ? renderGroupOutline({
+      visibleGroups,
+      activeGroupKey: initialActiveGroupKey,
+      tone,
+      searchQuery
+    })
+    : ''}
 
         ${!searchQuery && activeTab === 'quick' ? renderSchemaQuickPanel({
     quickSections,
@@ -1238,7 +1745,8 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
     group,
     tone,
     position,
-    openGroupKeySet.has(group.key)
+    openGroupKeySet.has(group.key),
+    openClusterKeySet
   )).join('')}
           </div>
         ` : `
@@ -1254,19 +1762,13 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
         `}
       </main>
 
-      <details class="editor-footer">
-        <summary>高级信息</summary>
-        <div class="editor-footer__content">
-          <div class="editor-footer__meta">
-            <span class="status-pill ${statusTone}">${escapeHtml(formatSchemaSourceLabel(summary))}</span>
-            ${summary.fetchedAt ? `<span class="status-pill is-muted">${escapeHtml(formatSchemaFetchedAt(summary.fetchedAt))}</span>` : ''}
-          </div>
-          ${renderSchemaSyncNote(summary)}
-          <code class="schema-workbench__path">${escapeHtml(entry.compactPath || entry.path)}</code>
-          ${entry.creationHint || entry.statusHint || entry.description ? `<p class="editor-footer__hint">${escapeHtml(entry.creationHint || entry.statusHint || entry.description || '')}</p>` : ''}
-          <p class="editor-footer__hint">当前已有 ${currentDraft.schemaFields?.length || 0} 个字段，其中 ${summary.matchedOfficialCount || 0} 个能匹配官方说明。</p>
-        </div>
-      </details>
+      ${renderEditorFooter({
+    summary,
+    entry,
+    tone,
+    statusTone,
+    fieldCount: currentDraft.schemaFields?.length || 0
+  })}
 
       <dialog class="add-field-modal" aria-labelledby="add-field-modal-title">
         <div class="modal-backdrop" data-action="close-add-field-modal"></div>
@@ -1316,16 +1818,55 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
   `;
 
   const modal = container.querySelector('.add-field-modal');
+  const toolbar = container.querySelector('.editor-toolbar');
+  const scrollRoot = container.querySelector('#schema-view-panel');
   const groupElements = [...container.querySelectorAll('details.group-card')];
+  const clusterElements = [...container.querySelectorAll('details.group-cluster')];
   let searchInputTimer = 0;
+  let activeGroupFrame = 0;
   let isSearchComposing = false;
+  let modalOpenTrigger = null;
+
+  const closeModal = () => {
+    if (!modal) return;
+    if (typeof modal.close === 'function') {
+      modal.close();
+    } else {
+      modal.removeAttribute('open');
+      modal.style.display = 'none';
+    }
+    if (modalOpenTrigger instanceof HTMLElement) {
+      modalOpenTrigger.focus({ preventScroll: true });
+      modalOpenTrigger = null;
+    }
+  };
+
+  if (modal) {
+    modal.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeModal();
+    });
+    modal.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' || event.key === 'Esc') {
+        event.preventDefault();
+        event.stopPropagation();
+        closeModal();
+      }
+    });
+  }
   let currentUiState = {
     openKeys: groupElements.length > 0
-      ? groupElements
+      ? normalizeAccordionGroupKeys(visibleGroups, groupElements
         .filter((groupElement) => groupElement.open)
         .map((groupElement) => groupElement.getAttribute('data-group-key'))
-        .filter(Boolean)
+        .filter(Boolean))
       : defaultOpenKeys,
+    openClusterKeys: clusterElements.length > 0
+      ? normalizeAccordionClusterKeys(visibleGroups, clusterElements
+        .filter((clusterElement) => clusterElement.open)
+        .map((clusterElement) => clusterElement.getAttribute('data-cluster-key'))
+        .filter(Boolean))
+      : defaultOpenClusterKeys,
     activeGroupKey: initialActiveGroupKey,
     activeTab,
     searchQuery,
@@ -1336,6 +1877,14 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
 
   const persistUiState = () => {
     writeSchemaUiState(container, entry.id, currentUiState);
+  };
+
+  const syncOutlineActiveState = (groupKey = '') => {
+    container.querySelectorAll('.group-outline-chip').forEach((chip) => {
+      const isActive = chip.getAttribute('data-group-key') === groupKey;
+      chip.classList.toggle('is-active', isActive);
+      chip.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
   };
 
   const focusSchemaField = (fieldPath) => {
@@ -1382,12 +1931,79 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
   const syncOpenGroups = () => {
     currentUiState = {
       ...currentUiState,
-      openKeys: groupElements
+      openKeys: normalizeAccordionGroupKeys(visibleGroups, groupElements
         .filter((groupElement) => groupElement.open)
         .map((groupElement) => groupElement.getAttribute('data-group-key'))
-        .filter(Boolean)
+        .filter(Boolean))
     };
     persistUiState();
+  };
+
+  const syncOpenClusters = () => {
+    currentUiState = {
+      ...currentUiState,
+      openClusterKeys: normalizeAccordionClusterKeys(visibleGroups, clusterElements
+        .filter((clusterElement) => clusterElement.open)
+        .map((clusterElement) => clusterElement.getAttribute('data-cluster-key'))
+        .filter(Boolean))
+    };
+    persistUiState();
+  };
+
+  const revealPreferredCluster = (groupElement) => {
+    if (!(groupElement instanceof HTMLDetailsElement)) {
+      return;
+    }
+
+    const clusterNodes = [...groupElement.querySelectorAll('details.group-cluster')];
+    if (clusterNodes.length === 0 || clusterNodes.some((clusterNode) => clusterNode.open)) {
+      return;
+    }
+
+    const groupKey = groupElement.getAttribute('data-group-key') || '';
+    const preferredClusterKey = currentUiState.openClusterKeys.find((key) => key.startsWith(`${groupKey}::`));
+    const nextCluster = clusterNodes.find((clusterNode) => (
+      clusterNode.getAttribute('data-cluster-key') === preferredClusterKey
+    )) || clusterNodes[0];
+
+    if (nextCluster instanceof HTMLDetailsElement) {
+      nextCluster.open = true;
+    }
+  };
+
+  const openExclusiveGroup = (groupElement) => {
+    if (!(groupElement instanceof HTMLDetailsElement)) {
+      return;
+    }
+
+    groupElements.forEach((candidate) => {
+      if (candidate !== groupElement && candidate.open) {
+        candidate.open = false;
+      }
+    });
+
+    if (!groupElement.open) {
+      groupElement.open = true;
+    }
+
+    revealPreferredCluster(groupElement);
+  };
+
+  const syncActiveGroup = ({ persist = true } = {}) => {
+    const nextActiveGroupKey = resolveActiveGroupKey(scrollRoot, toolbar, groupElements) || initialActiveGroupKey;
+    if (!nextActiveGroupKey || nextActiveGroupKey === currentUiState.activeGroupKey) {
+      syncOutlineActiveState(currentUiState.activeGroupKey);
+      return;
+    }
+
+    currentUiState = {
+      ...currentUiState,
+      activeGroupKey: nextActiveGroupKey
+    };
+    syncOutlineActiveState(nextActiveGroupKey);
+    if (persist) {
+      persistUiState();
+    }
   };
 
   const addSchemaField = (pathValue = '') => {
@@ -1421,6 +2037,7 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
       };
       persistUiState();
       onDraftChange(currentDraft);
+      closeModal();
       rerenderEditor({ focusFieldPath: normalizedPath });
     } catch (error) {
       window.alert(error instanceof Error ? error.message : String(error));
@@ -1429,10 +2046,60 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
 
   groupElements.forEach((groupElement) => {
     groupElement.addEventListener('toggle', () => {
+      if (groupElement.open) {
+        openExclusiveGroup(groupElement);
+        currentUiState = {
+          ...currentUiState,
+          activeGroupKey: groupElement.getAttribute('data-group-key') || currentUiState.activeGroupKey
+        };
+        syncOutlineActiveState(currentUiState.activeGroupKey);
+      }
+
       syncOpenGroups();
     });
   });
 
+  clusterElements.forEach((clusterElement) => {
+    clusterElement.addEventListener('toggle', () => {
+      if (clusterElement.open) {
+        const parentGroup = clusterElement.closest('details.group-card');
+        if (parentGroup instanceof HTMLDetailsElement) {
+          parentGroup.querySelectorAll('details.group-cluster').forEach((candidate) => {
+            if (candidate !== clusterElement && candidate.open) {
+              candidate.open = false;
+            }
+          });
+        }
+      }
+
+      syncOpenClusters();
+    });
+  });
+
+  const initiallyOpenGroup = groupElements.find((groupElement) => groupElement.open);
+  if (initiallyOpenGroup) {
+    openExclusiveGroup(initiallyOpenGroup);
+    syncOpenGroups();
+    syncOpenClusters();
+  }
+
+  if (scrollRoot) {
+    scrollRoot.addEventListener('scroll', () => {
+      if (activeGroupFrame) {
+        window.cancelAnimationFrame(activeGroupFrame);
+      }
+
+      activeGroupFrame = window.requestAnimationFrame(() => {
+        activeGroupFrame = 0;
+        syncActiveGroup();
+      });
+    }, { passive: true });
+  }
+
+  syncOutlineActiveState(currentUiState.activeGroupKey);
+  window.requestAnimationFrame(() => {
+    syncActiveGroup({ persist: false });
+  });
   persistUiState();
 
   container.oncompositionstart = (event) => {
@@ -1573,14 +2240,43 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
       const nextTabId = button.getAttribute('data-tab-id') || 'quick';
       currentUiState = {
         ...currentUiState,
-        activeTab: nextTabId
+        activeTab: nextTabId,
+        activeGroupKey: ''
       };
       persistUiState();
       rerenderEditor();
       return;
     }
 
+    if (action === 'jump-schema-group') {
+      const targetGroupKey = button.getAttribute('data-group-key') || '';
+      const anchorId = button.getAttribute('data-group-anchor-id') || '';
+      const groupElement = anchorId
+        ? container.querySelector(`#${anchorId}`)
+        : container.querySelector(`details.group-card[data-group-key="${targetGroupKey}"]`);
+
+      if (groupElement instanceof HTMLDetailsElement) {
+        openExclusiveGroup(groupElement);
+        syncOpenGroups();
+      }
+
+      currentUiState = {
+        ...currentUiState,
+        activeGroupKey: targetGroupKey || currentUiState.activeGroupKey
+      };
+      syncOutlineActiveState(currentUiState.activeGroupKey);
+      persistUiState();
+
+      if (scrollRoot && groupElement instanceof HTMLElement) {
+        const targetTop = Math.max(0, groupElement.offsetTop - 12);
+        const prefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+        scrollRoot.scrollTo({ top: targetTop, behavior: prefersReducedMotion ? 'auto' : 'smooth' });
+      }
+      return;
+    }
+
     if (action === 'open-add-field-modal') {
+      modalOpenTrigger = button instanceof HTMLElement ? button : null;
       if (modal && typeof modal.showModal === 'function') {
         modal.showModal();
         const firstInput = modal.querySelector('input[name="schema-add-path"]');
@@ -1595,12 +2291,7 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
     }
 
     if (action === 'close-add-field-modal') {
-      if (modal && typeof modal.close === 'function') {
-        modal.close();
-      } else if (modal) {
-        modal.removeAttribute('open');
-        modal.style.display = 'none';
-      }
+      closeModal();
       return;
     }
   };
