@@ -403,6 +403,42 @@ function getGroupDescription(groupKey) {
   return '补充对象';
 }
 
+function getAssistantSectionKey(entry) {
+  const assistantKey = normalizeKey(entry.assistant || '');
+  if (assistantKey === 'codex' || assistantKey === 'claude') {
+    return assistantKey;
+  }
+
+  return 'other';
+}
+
+function getAssistantSectionMeta(sectionKey = '') {
+  if (sectionKey === 'codex') {
+    return {
+      key: 'codex',
+      label: 'Codex',
+      description: 'Codex CLI 配置',
+      tone: 'codex'
+    };
+  }
+
+  if (sectionKey === 'claude') {
+    return {
+      key: 'claude',
+      label: 'Claude',
+      description: 'Claude Code 配置',
+      tone: 'claude'
+    };
+  }
+
+  return {
+    key: 'other',
+    label: '其他',
+    description: '补充对象',
+    tone: 'neutral'
+  };
+}
+
 function getAssistantChipTone(entry) {
   const assistantKey = normalizeKey(entry.assistant || '');
   if (assistantKey === 'codex' || assistantKey === 'claude') {
@@ -448,15 +484,41 @@ function renderSidebarSignal(label, count, tone = 'neutral') {
   `;
 }
 
+function renderEntryPath(pathValue = '', fullPath = '') {
+  const normalizedPath = String(pathValue || '').trim();
+  if (!normalizedPath) {
+    return '';
+  }
+
+  const segments = normalizedPath.split(/[\\/]+/).filter(Boolean);
+  const pathTitle = String(fullPath || normalizedPath);
+
+  if (segments.length <= 1) {
+    return `
+      <span class="nav-entry__path" title="${escapeHtml(pathTitle)}">
+        <span class="nav-entry__path-leaf">${escapeHtml(normalizedPath)}</span>
+      </span>
+    `;
+  }
+
+  const leaf = segments[segments.length - 1];
+  const prefix = segments.slice(0, -1).join(' / ');
+
+  return `
+    <span class="nav-entry__path" title="${escapeHtml(pathTitle)}">
+      <span class="nav-entry__path-prefix">${escapeHtml(`${prefix} /`)}</span>
+      <span class="nav-entry__path-leaf">${escapeHtml(leaf)}</span>
+    </span>
+  `;
+}
+
 function renderEntry(entry, selectedId) {
   const assistantKey = normalizeKey(entry.assistant || '');
   const assistantAttr = (assistantKey === 'codex' || assistantKey === 'claude') ? assistantKey : '';
   const summaryItems = [
-    getScopeSummaryLabel(entry),
     entry.accessLabel
   ].filter(Boolean);
   const chips = [
-    renderNavChip(pickText(entry.assistantShortLabel, entry.assistantLabel), getAssistantChipTone(entry)),
     renderNavChip(entry.objectKindLabel, getObjectKindChipTone(entry.objectKind))
   ].filter(Boolean);
   const pathValue = entry.pathLabel || entry.compactPath || entry.path || '';
@@ -483,16 +545,50 @@ function renderEntry(entry, selectedId) {
           ${escapeHtml(summaryItems.join(' · '))}
         </span>
       ` : ''}
-      ${
-        pathValue
-          ? `<span class="nav-entry__path" title="${escapeHtml(entry.path || '')}">${escapeHtml(pathValue)}</span>`
-          : ''
-      }
+      ${renderEntryPath(pathValue, entry.path || pathValue)}
     </button>
   `;
 }
 
+function renderAssistantSection(section, selectedId, { flattened = false } = {}) {
+  const meta = getAssistantSectionMeta(section.key);
+
+  if (flattened) {
+    return `
+      <div class="nav-assistant-section nav-assistant-section--${escapeHtml(meta.tone)} nav-assistant-section--flat" aria-label="${escapeHtml(meta.description)}">
+        <div class="nav-assistant-section__body">
+          ${section.entries.map((entry) => renderEntry(entry, selectedId)).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <section class="nav-assistant-section nav-assistant-section--${escapeHtml(meta.tone)}" aria-label="${escapeHtml(meta.description)}">
+      <header class="nav-assistant-section__header">
+        <div class="nav-assistant-section__header-main">
+          <span class="nav-assistant-section__label">${escapeHtml(meta.label)}</span>
+          <span class="nav-assistant-section__description">${escapeHtml(meta.description)}</span>
+        </div>
+        <span class="nav-assistant-section__count">${section.entries.length}</span>
+      </header>
+      <div class="nav-assistant-section__body">
+        ${section.entries.map((entry) => renderEntry(entry, selectedId)).join('')}
+      </div>
+    </section>
+  `;
+}
+
 function renderGroup(group, selectedId) {
+  const assistantSectionOrder = ['codex', 'claude', 'other'];
+  const assistantSections = assistantSectionOrder
+    .map((sectionKey) => ({
+      key: sectionKey,
+      entries: group.entries.filter((entry) => getAssistantSectionKey(entry) === sectionKey)
+    }))
+    .filter((section) => section.entries.length > 0);
+  const shouldFlattenAssistantSections = assistantSections.length <= 1;
+
   return `
     <section class="nav-group nav-group--${escapeHtml(group.key)}">
       <header class="nav-group__header">
@@ -503,7 +599,9 @@ function renderGroup(group, selectedId) {
         <span class="nav-group__count">${group.entries.length} 项</span>
       </header>
       <div class="nav-group__body">
-        ${group.entries.map((entry) => renderEntry(entry, selectedId)).join('')}
+        ${assistantSections.map((section) => renderAssistantSection(section, selectedId, {
+    flattened: shouldFlattenAssistantSections
+  })).join('')}
       </div>
     </section>
   `;
@@ -558,7 +656,6 @@ export function renderSidebar(container, { entries, projectPath, selectedId, onS
 
   const themeMeta = getThemeToggleMeta(currentTheme);
   const versionLabel = appVersion ? `v${escapeHtml(appVersion)}` : '版本读取中';
-  const projectScopeLabel = projectPath ? escapeHtml(projectPath) : '未选择项目时，只显示个人默认配置。';
   const totalEntryCount = normalizedEntries.length;
   const assistantCounts = normalizedEntries.reduce((counts, entry) => {
     const assistantKey = normalizeKey(entry.assistant || '');
@@ -569,6 +666,12 @@ export function renderSidebar(container, { entries, projectPath, selectedId, onS
     }
     return counts;
   }, { codex: 0, claude: 0, other: 0 });
+  const assistantSummary = [
+    assistantCounts.codex ? `Codex ${assistantCounts.codex}` : '',
+    assistantCounts.claude ? `Claude ${assistantCounts.claude}` : '',
+    assistantCounts.other ? `其他 ${assistantCounts.other}` : ''
+  ].filter(Boolean).join(' · ');
+  const projectScopeValue = projectPath || '未选择项目';
   const navigationHtml = sortedGroups.length > 0
     ? `
       <nav class="sidebar-nav" aria-label="配置对象">
@@ -587,22 +690,21 @@ export function renderSidebar(container, { entries, projectPath, selectedId, onS
       <div class="brand-block">
         <p class="brand-block__eyebrow">配置导航</p>
         <div class="brand-block__headline">
-          <h1>CodeConfigHub</h1>
-          <span class="brand-block__count">${totalEntryCount} 项</span>
+          <div class="brand-block__heading">
+            <h1>CodeConfigHub</h1>
+            <p class="brand-block__copy">左侧专心找对象，右侧只处理当前这一份配置。</p>
+          </div>
         </div>
-        <p class="brand-block__copy">按范围和对象切换，右侧只处理当前这一份配置。</p>
-        <div class="brand-block__signals">
-          ${[
-    renderSidebarSignal('Codex', assistantCounts.codex, 'codex'),
-    renderSidebarSignal('Claude', assistantCounts.claude, 'claude'),
-    renderSidebarSignal('其他', assistantCounts.other, 'neutral')
-  ].filter(Boolean).join('')}
+        <p class="brand-block__meta">${escapeHtml([`${totalEntryCount} 项`, assistantSummary].filter(Boolean).join(' · '))}</p>
+        <div class="brand-block__signals" aria-label="当前对象概览">
+          ${renderSidebarSignal('Codex', assistantCounts.codex, 'codex')}
+          ${renderSidebarSignal('Claude', assistantCounts.claude, 'claude')}
+          ${assistantCounts.other ? renderSidebarSignal('其他', assistantCounts.other, 'neutral') : ''}
         </div>
-      </div>
-
-      <div class="project-scope">
-        <span class="project-scope__label">当前工作区</span>
-        <code class="project-scope__value" title="${projectPath ? escapeHtml(projectPath) : '未选择项目'}">${projectScopeLabel}</code>
+        <div class="brand-block__workspace">
+          <span class="brand-block__workspace-label">当前工作区</span>
+          <code class="brand-block__workspace-value" title="${escapeHtml(projectScopeValue)}">${escapeHtml(projectScopeValue)}</code>
+        </div>
       </div>
 
       ${navigationHtml}

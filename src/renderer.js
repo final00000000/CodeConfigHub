@@ -17,6 +17,7 @@ const state = {
   codexOfficialSchema: null,
   claudeOfficialSchema: null,
   schemaRefreshAssistant: null,
+  schemaAutoRefreshIntervalMs: 0,
   appVersion: '',
   previewSearchByEntry: {}
 };
@@ -26,6 +27,14 @@ const REPOSITORY_URL = 'https://github.com/final00000000/CodeConfigHub';
 const SPLIT_RATIO_MIN = 32;
 const SPLIT_RATIO_MAX = 78;
 const SPLIT_RATIO_STEP = 4;
+const SCHEMA_AUTO_REFRESH_STORAGE_KEY = 'schema-auto-refresh-interval-ms';
+const SCHEMA_AUTO_REFRESH_OPTIONS = [
+  { value: 0, label: '手动' },
+  { value: 12 * 60 * 60 * 1000, label: '12 小时' },
+  { value: 24 * 60 * 60 * 1000, label: '1 天' },
+  { value: 3 * 24 * 60 * 60 * 1000, label: '3 天' },
+  { value: 5 * 24 * 60 * 60 * 1000, label: '5 天' }
+];
 
 let pendingPreviewTimer = null;
 let lastUpdateErrorFingerprint = '';
@@ -39,9 +48,111 @@ let updateInteractionPhase = 'idle';
 let isComposingInput = false;
 let hasBoundGlobalUiHandlers = false;
 let lastFocusedElementBeforeUpdateModal = null;
+let schemaAutoRefreshTimer = null;
+let isSchemaAutoRefreshRunning = false;
 
 function getDesktopApi() {
   return window.codeConfigHubAPI || window.configManagerAPI;
+}
+
+function normalizeSchemaAutoRefreshInterval(value) {
+  const parsed = Number(value);
+  return SCHEMA_AUTO_REFRESH_OPTIONS.some((option) => option.value === parsed) ? parsed : 0;
+}
+
+function getSchemaAutoRefreshLabel(intervalMs = 0) {
+  return SCHEMA_AUTO_REFRESH_OPTIONS.find((option) => option.value === intervalMs)?.label || '手动';
+}
+
+function syncSchemaAutoRefreshControl() {
+  if (!(elements.schemaAutoRefreshSelect instanceof HTMLSelectElement)) {
+    return;
+  }
+
+  elements.schemaAutoRefreshSelect.value = String(state.schemaAutoRefreshIntervalMs || 0);
+}
+
+function restoreSchemaAutoRefreshSetting() {
+  state.schemaAutoRefreshIntervalMs = normalizeSchemaAutoRefreshInterval(
+    window.localStorage.getItem(SCHEMA_AUTO_REFRESH_STORAGE_KEY) || 0
+  );
+  syncSchemaAutoRefreshControl();
+}
+
+function clearSchemaAutoRefreshTimer() {
+  if (schemaAutoRefreshTimer) {
+    window.clearInterval(schemaAutoRefreshTimer);
+    schemaAutoRefreshTimer = null;
+  }
+}
+
+function shouldDeferSchemaAutoRefresh() {
+  const activeElement = document.activeElement;
+  return Boolean(
+    state.dirty
+    || isComposingInput
+    || state.schemaRefreshAssistant
+    || isUpdateDownloadPending
+    || (
+      activeElement instanceof HTMLElement
+      && (
+        elements.editorPanel?.contains(activeElement)
+        || elements.updateModalRoot?.contains(activeElement)
+      )
+    )
+  );
+}
+
+async function runSchemaAutoRefreshCycle() {
+  if (isSchemaAutoRefreshRunning || !state.schemaAutoRefreshIntervalMs || shouldDeferSchemaAutoRefresh()) {
+    return;
+  }
+
+  isSchemaAutoRefreshRunning = true;
+  try {
+    await Promise.all([
+      loadOfficialSchema('codex', true, { silent: true, showProgress: false }),
+      loadOfficialSchema('claude', true, { silent: true, showProgress: false })
+    ]);
+  } finally {
+    isSchemaAutoRefreshRunning = false;
+  }
+}
+
+function scheduleSchemaAutoRefresh() {
+  clearSchemaAutoRefreshTimer();
+
+  if (!state.schemaAutoRefreshIntervalMs) {
+    return;
+  }
+
+  schemaAutoRefreshTimer = window.setInterval(() => {
+    runSchemaAutoRefreshCycle().catch((error) => {
+      console.warn('Schema auto refresh failed:', error);
+    });
+  }, state.schemaAutoRefreshIntervalMs);
+}
+
+function updateSchemaAutoRefreshSetting(nextIntervalValue) {
+  const nextIntervalMs = normalizeSchemaAutoRefreshInterval(nextIntervalValue);
+  state.schemaAutoRefreshIntervalMs = nextIntervalMs;
+  window.localStorage.setItem(SCHEMA_AUTO_REFRESH_STORAGE_KEY, String(nextIntervalMs));
+  syncSchemaAutoRefreshControl();
+  scheduleSchemaAutoRefresh();
+
+  if (nextIntervalMs > 0) {
+    runSchemaAutoRefreshCycle().catch((error) => {
+      console.warn('Schema auto refresh failed:', error);
+    });
+  }
+
+  showToast({
+    title: 'Schema 自动拉取已更新',
+    message: nextIntervalMs > 0
+      ? `已开启后台自动拉取：每 ${getSchemaAutoRefreshLabel(nextIntervalMs)} 同步一次。`
+      : '已关闭后台自动拉取，后续仅在手动刷新时同步。',
+    tone: 'success'
+  });
 }
 
 function stringifyUpdateError(payload) {
@@ -342,14 +453,16 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindGlobalUiHandlers();
   initializeToast(elements.toastRoot);
   restoreTheme();
+  restoreSchemaAutoRefreshSetting();
   bindTopbarActions();
   bindSplitter();
   await loadAppVersion();
   await discoverConfigs();
   await Promise.all([
-    loadCodexOfficialSchema(false, { silent: true }),
-    loadClaudeOfficialSchema(false, { silent: true })
+    loadCodexOfficialSchema(true, { silent: true }),
+    loadClaudeOfficialSchema(true, { silent: true })
   ]);
+  scheduleSchemaAutoRefresh();
 
   // Initialize update listener ONCE
   initUpdateListener();
@@ -597,6 +710,7 @@ function cacheElements() {
   elements.previewToggleButton = document.getElementById('preview-toggle-btn');
   elements.rescanButton = document.getElementById('rescan-btn');
   elements.chooseProjectButton = document.getElementById('choose-project-btn');
+  elements.schemaAutoRefreshSelect = document.getElementById('schema-auto-refresh-select');
   elements.workspaceGlobalActions = document.getElementById('workspace-global-actions');
   elements.workspaceEntryActions = document.getElementById('workspace-entry-actions');
   elements.workspaceEntryActionCluster = document.getElementById('workspace-entry-action-cluster');
@@ -675,6 +789,13 @@ function bindTopbarActions() {
   elements.rescanButton.textContent = '重新扫描';
   elements.rescanButton.title = '重新扫描个人默认与当前项目配置（全局操作）';
   elements.rescanButton.setAttribute('aria-label', '重新扫描全部配置');
+  syncSchemaAutoRefreshControl();
+
+  if (elements.schemaAutoRefreshSelect) {
+    elements.schemaAutoRefreshSelect.onchange = () => {
+      updateSchemaAutoRefreshSetting(elements.schemaAutoRefreshSelect.value);
+    };
+  }
 
   elements.chooseProjectButton.onclick = async () => {
     const projectPath = await getDesktopApi().chooseProjectDirectory();
@@ -914,8 +1035,8 @@ function syncPreviewPanelLayout() {
     elements.panelSplitter.tabIndex = previewVisible ? 0 : -1;
     elements.panelSplitter.setAttribute('aria-hidden', String(!previewVisible));
     elements.panelSplitter.setAttribute('aria-disabled', String(!previewVisible));
-    elements.panelSplitter.setAttribute('role', 'separator');
-    elements.panelSplitter.setAttribute('aria-orientation', 'vertical');
+    elements.panelSplitter.setAttribute('role', 'slider');
+    elements.panelSplitter.setAttribute('aria-orientation', 'horizontal');
   }
 
   applySplitRatio();
@@ -1109,13 +1230,13 @@ function rebuildSchemaDrivenDraft(entry, officialSchemaState) {
   state.draft = nextDraft;
 }
 
-async function loadOfficialSchema(assistant, forceRefresh = false, { silent = false } = {}) {
+async function loadOfficialSchema(assistant, forceRefresh = false, { silent = false, showProgress = true } = {}) {
   const api = getDesktopApi();
   const schemaStateKey = assistant === 'claude' ? 'claudeOfficialSchema' : 'codexOfficialSchema';
   const apiMethod = assistant === 'claude' ? 'getClaudeOfficialSchema' : 'getCodexOfficialSchema';
   const titlePrefix = assistant === 'claude' ? 'Claude' : 'Codex';
   const selectedEntry = getSelectedEntry();
-  const shouldRenderProgress = selectedEntry?.assistant === assistant && isSchemaDrivenEntry(selectedEntry);
+  const shouldRenderProgress = showProgress && selectedEntry?.assistant === assistant && isSchemaDrivenEntry(selectedEntry);
 
   if (!api?.[apiMethod]) {
     return;
@@ -1133,6 +1254,9 @@ async function loadOfficialSchema(assistant, forceRefresh = false, { silent = fa
     const entry = getSelectedEntry();
     if (entry?.assistant === assistant && isSchemaDrivenEntry(entry)) {
       rebuildSchemaDrivenDraft(entry, result);
+      if (!shouldRenderProgress) {
+        render();
+      }
     }
 
     if (!silent) {
@@ -1165,6 +1289,9 @@ async function loadOfficialSchema(assistant, forceRefresh = false, { silent = fa
     const entry = getSelectedEntry();
     if (entry?.assistant === assistant && isSchemaDrivenEntry(entry)) {
       rebuildSchemaDrivenDraft(entry, fallbackState);
+      if (!shouldRenderProgress) {
+        render();
+      }
     }
 
     if (!silent) {

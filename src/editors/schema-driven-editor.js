@@ -648,9 +648,14 @@ function renderEditorToolbar({
           <div class="editor-toolbar__meta">
             <span class="editor-badge editor-badge--${tone}">${entry.exists ? '当前对象' : '待创建'}</span>
             <span class="status-pill ${statusTone}">${escapeHtml(formatSchemaSourceLabel(summary))}</span>
-            ${activeTabMeta ? `<span class="status-pill is-muted">${escapeHtml(activeTabMeta.label)}</span>` : ''}
             ${summary.fetchedAt ? `<span class="editor-toolbar__meta-note">同步 ${escapeHtml(formatSchemaFetchedAt(summary.fetchedAt))}</span>` : ''}
           </div>
+          ${pathLabel ? `
+            <div class="editor-toolbar__path-row">
+              <span class="editor-toolbar__path-label">文件</span>
+              <code class="editor-toolbar__path" title="${escapeHtml(entry.path || pathLabel)}">${escapeHtml(pathLabel)}</code>
+            </div>
+          ` : ''}
         </div>
       </div>
 
@@ -693,11 +698,6 @@ function renderSchemaQuickPanel({ quickSections = [], suggestionFields = [], gro
   return `
     <section class="quick-panel quick-panel--${tone}" aria-label="常用字段">
       <div class="quick-panel__hero">
-        <div class="quick-panel__intro">
-          <p class="quick-panel__eyebrow">常用参数</p>
-          <h3>先改最常用的几项</h3>
-          <p>把高频项留在第一屏。需要深入时，再切到下面的分类页签。</p>
-        </div>
         <div class="quick-panel__stats" aria-label="字段概览">
           <div class="quick-stat">
             <strong>${totalFieldCount}</strong>
@@ -727,7 +727,7 @@ function renderSchemaQuickPanel({ quickSections = [], suggestionFields = [], gro
                 <span class="quick-section-card__count">${section.items.length} 项</span>
               </div>
               <div class="quick-section-card__fields">
-                ${section.items.map(({ field, index }) => renderField(field, index)).join('')}
+                ${section.items.map(({ field, index }) => renderField(field, index, { compact: true })).join('')}
               </div>
             </section>
           `).join('')}
@@ -1349,6 +1349,28 @@ function shouldShowFieldNote(noteCopy = '', { compact = false } = {}) {
   return true;
 }
 
+function renderCompactFieldMeta({ pathLabel = '', actualPath = '', showNote = false, noteCopy = '', tone = 'neutral' } = {}) {
+  const items = [];
+
+  if (pathLabel) {
+    items.push(`<code class="field-inline-chip field-inline-chip--path" title="${escapeHtml(actualPath || pathLabel)}">${escapeHtml(pathLabel)}</code>`);
+  }
+
+  if (showNote) {
+    items.push(`<span class="field-inline-note field-inline-note--${tone}" title="${escapeHtml(noteCopy)}">${escapeHtml(noteCopy)}</span>`);
+  }
+
+  if (items.length === 0) {
+    return '';
+  }
+
+  return `
+    <span class="field-meta-inline">
+      ${items.join('')}
+    </span>
+  `;
+}
+
 function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = '' } = {}) {
   const tone = getFieldPrimaryTone(field);
   const badges = [];
@@ -1384,14 +1406,22 @@ function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = ''
     : '';
   const noteCopy = getFieldNoteCopy(field);
   const showNote = shouldShowFieldNote(noteCopy, { compact });
-  const detailsHtml = pathChip || showNote
-    ? `
-      <span class="field-meta-stack">
-        ${pathChip ? `<span class="field-detail-line field-detail-line--path"><span class="field-detail-label">路径</span>${pathChip}</span>` : ''}
-        ${showNote ? `<span class="field-note-line field-note-line--${tone}"><span class="field-detail-label">提醒</span><span class="field-note-text">${escapeHtml(noteCopy)}</span></span>` : ''}
-      </span>
-    `
-    : '';
+  const detailsHtml = compact
+    ? renderCompactFieldMeta({
+      pathLabel: shouldRenderPath ? pathLabel : '',
+      actualPath: field.actualPath,
+      showNote,
+      noteCopy,
+      tone
+    })
+    : (pathChip || showNote
+        ? `
+          <span class="field-meta-stack">
+            ${pathChip ? `<span class="field-detail-line field-detail-line--path"><span class="field-detail-label">路径</span>${pathChip}</span>` : ''}
+            ${showNote ? `<span class="field-note-line field-note-line--${tone}"><span class="field-detail-label">提醒</span><span class="field-note-text">${escapeHtml(noteCopy)}</span></span>` : ''}
+          </span>
+        `
+        : '');
 
   return {
     tone,
@@ -1541,91 +1571,23 @@ function renderSchemaSyncNote(summary = {}) {
   `;
 }
 
-function renderEditorFooterStat(label, value, tone = 'neutral') {
-  return `
-    <div class="editor-footer-stat editor-footer-stat--${tone}">
-      <strong>${escapeHtml(value)}</strong>
-      <span>${escapeHtml(label)}</span>
-    </div>
-  `;
-}
-
 function renderEditorFooter({
   summary = {},
-  entry = {},
   tone = 'codex',
-  statusTone = 'is-muted',
   fieldCount = 0
 } = {}) {
-  const sourceLabel = formatSchemaSourceLabel(summary);
   const matchedCount = summary.matchedOfficialCount || 0;
   const localOnlyCount = summary.localOnlyCount ?? Math.max(0, fieldCount - matchedCount);
-  const pathLabel = entry.compactPath || entry.path || '';
-  const hintCopy = entry.creationHint || entry.statusHint || entry.description || '';
-  const syncDescription = summary.available
-    ? '这里集中看字段匹配、Schema 来源和回写目标文件。'
-    : '当前仍按本地字段结构推断，但保存时会正常回写。';
 
   return `
-    <details class="editor-footer editor-footer--${tone}">
-      <summary class="editor-footer__summary">
-        <div class="editor-footer__summary-main">
-          <p class="editor-footer__eyebrow">底部信息</p>
-          <div class="editor-footer__summary-copy">
-            <strong>同步与回写信息</strong>
-            <span>不用离开编辑区，也能确认来源、字段统计和目标文件。</span>
-          </div>
-        </div>
-        <div class="editor-footer__summary-meta">
-          <span class="editor-footer__summary-pill">${fieldCount} 项</span>
-          <span class="editor-footer__summary-pill editor-footer__summary-pill--${tone}">${escapeHtml(sourceLabel)}</span>
-          <span class="editor-footer__chevron" aria-hidden="true">⌄</span>
-        </div>
-      </summary>
-      <div class="editor-footer__content">
-        <div class="editor-footer__grid">
-          <section class="editor-footer-card">
-            <div class="editor-footer-card__header">
-              <div>
-                <p class="editor-footer-card__eyebrow">字段概览</p>
-                <h4>当前映射情况</h4>
-              </div>
-            </div>
-            <div class="editor-footer-stats">
-              ${renderEditorFooterStat('当前字段', `${fieldCount}`, 'neutral')}
-              ${renderEditorFooterStat('匹配官方', `${matchedCount}`, tone)}
-              ${renderEditorFooterStat('本地扩展', `${localOnlyCount}`, localOnlyCount > 0 ? 'custom' : 'neutral')}
-            </div>
-          </section>
-
-          <section class="editor-footer-card editor-footer-card--${tone}">
-            <div class="editor-footer-card__header">
-              <div>
-                <p class="editor-footer-card__eyebrow">同步状态</p>
-                <h4>${escapeHtml(sourceLabel)}</h4>
-              </div>
-            </div>
-            <div class="editor-footer__meta">
-              <span class="status-pill ${statusTone}">${escapeHtml(sourceLabel)}</span>
-              ${summary.fetchedAt ? `<span class="status-pill is-muted">${escapeHtml(formatSchemaFetchedAt(summary.fetchedAt))}</span>` : ''}
-            </div>
-            <p class="editor-footer__hint">${escapeHtml(syncDescription)}</p>
-          </section>
-
-          <section class="editor-footer-card editor-footer-card--path">
-            <div class="editor-footer-card__header">
-              <div>
-                <p class="editor-footer-card__eyebrow">目标文件</p>
-                <h4>保存落点</h4>
-              </div>
-            </div>
-            <code class="editor-footer__path" title="${escapeHtml(entry.path || pathLabel)}">${escapeHtml(pathLabel || '未解析到文件路径')}</code>
-            ${hintCopy ? `<p class="editor-footer__hint">${escapeHtml(hintCopy)}</p>` : '<p class="editor-footer__hint">当前保存会写回这份配置文件；如果文件不存在，会按对象类型尝试创建。</p>'}
-          </section>
-        </div>
-        ${renderSchemaSyncNote(summary)}
+    <footer class="editor-footer editor-footer--${tone}">
+      <div class="editor-footer__bar">
+        <span class="editor-footer__stat">${matchedCount} 匹配官方</span>
+        <span class="editor-footer__sep" aria-hidden="true">·</span>
+        <span class="editor-footer__stat">${localOnlyCount} 本地扩展</span>
       </div>
-    </details>
+      ${renderSchemaSyncNote(summary)}
+    </footer>
   `;
 }
 
@@ -1764,9 +1726,7 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
 
       ${renderEditorFooter({
     summary,
-    entry,
     tone,
-    statusTone,
     fieldCount: currentDraft.schemaFields?.length || 0
   })}
 
