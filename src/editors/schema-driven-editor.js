@@ -616,6 +616,26 @@ function renderGroupOutline({
   `;
 }
 
+function renderSchemaStage({
+  outlineHtml = '',
+  contentHtml = ''
+} = {}) {
+  if (!outlineHtml) {
+    return contentHtml;
+  }
+
+  return `
+    <div class="schema-stage schema-stage--detailed">
+      <aside class="schema-stage__rail">
+        ${outlineHtml}
+      </aside>
+      <section class="schema-stage__content">
+        ${contentHtml}
+      </section>
+    </div>
+  `;
+}
+
 function renderEditorToolbar({
   entry,
   tone = 'codex',
@@ -698,6 +718,11 @@ function renderSchemaQuickPanel({ quickSections = [], suggestionFields = [], gro
   return `
     <section class="quick-panel quick-panel--${tone}" aria-label="常用字段">
       <div class="quick-panel__hero">
+        <div class="quick-panel__intro">
+          <p class="quick-panel__eyebrow">快速聚焦</p>
+          <h3>先改最常动的字段，再展开完整结构。</h3>
+          <p>把模型、权限、联网这些高频参数收拢在同一块工作面里，适合做一次快速巡检。</p>
+        </div>
         <div class="quick-panel__stats" aria-label="字段概览">
           <div class="quick-stat">
             <strong>${totalFieldCount}</strong>
@@ -886,34 +911,8 @@ function createGroupFieldLayout(group = {}) {
   };
 }
 
-function renderGroupOverview(stats, layout, tone = 'codex') {
-  const shouldRenderOverview = layout.shouldNest
-    || stats.totalCount >= 6
-    || stats.localCount > 0
-    || stats.structuredCount >= 2;
-
-  if (!shouldRenderOverview) {
-    return '';
-  }
-
-  const overviewItems = [
-    { label: '字段', value: `${stats.totalCount} 项` },
-    layout.shouldNest ? { label: '分块', value: `${layout.nestedGroups.length + (layout.directFields.length > 0 ? 1 : 0)} 块` } : null,
-    stats.officialCount > 0 ? { label: '官方', value: `${stats.officialCount} 项` } : null,
-    stats.localCount > 0 ? { label: '本地', value: `${stats.localCount} 项` } : null,
-    stats.structuredCount > 0 ? { label: '结构', value: `${stats.structuredCount} 项` } : null
-  ].filter(Boolean);
-
-  return `
-    <div class="group-card__overview group-card__overview--${tone}">
-      ${overviewItems.map((item) => `
-        <div class="group-card__overview-item">
-          <strong class="group-card__overview-value">${escapeHtml(item.value)}</strong>
-          <span class="group-card__overview-label">${escapeHtml(item.label)}</span>
-        </div>
-      `).join('')}
-    </div>
-  `;
+function renderGroupOverview() {
+  return '';
 }
 
 function buildPreviewLabels(values = []) {
@@ -987,11 +986,73 @@ function renderCollectionSummaryPills(summary = {}) {
   `;
 }
 
-function renderNestedCollection(collection, tone = 'codex', variant = 'nested', isOpen = false, stateKey = '') {
+function renderNestedCollection(
+  collection,
+  tone = 'codex',
+  variant = 'nested',
+  isOpen = false,
+  stateKey = '',
+  { collapsible = true } = {}
+) {
   const previewLabels = buildNestedCollectionPreview(collection.fields);
   const variantLabel = variant === 'direct' ? '基础块' : '分组块';
   const useCompactLayout = shouldUseCompactCollectionLayout(collection);
   const collectionSummary = summarizeCollectionFields(collection.fields);
+  const headerHtml = `
+    <div class="group-cluster__header">
+      <div class="group-cluster__copy">
+        <div class="group-cluster__eyebrow-row">
+          <p class="group-cluster__eyebrow">${escapeHtml(collection.eyebrow)}</p>
+          <span class="group-cluster__tag">${escapeHtml(variantLabel)}</span>
+        </div>
+        <h4>${escapeHtml(collection.title)}</h4>
+        ${useCompactLayout ? `
+          <div class="group-cluster__support">
+            ${collection.pathLabel ? `
+              <div class="group-cluster__support-row">
+                <span class="group-cluster__support-label">前缀</span>
+                <code class="group-cluster__path group-cluster__path--inline" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
+              </div>
+            ` : ''}
+            ${renderCollectionSummaryPills(collectionSummary)}
+          </div>
+        ` : `
+          <p class="group-cluster__hint">${escapeHtml(collection.hint)}</p>
+          ${renderPreviewChips(previewLabels, 3)}
+        `}
+      </div>
+      <div class="group-cluster__meta">
+        ${!useCompactLayout && collection.pathLabel ? `
+          <div class="group-cluster__meta-panel">
+            <span class="group-cluster__meta-label">字段前缀</span>
+            <code class="group-cluster__path" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
+          </div>
+        ` : ''}
+        <div class="group-cluster__meta-row">
+          <span class="group-cluster__count">${collection.fields.length} 项</span>
+          ${collapsible ? '<span class="group-cluster__chevron" aria-hidden="true">⌄</span>' : ''}
+        </div>
+      </div>
+    </div>
+  `;
+
+  if (!collapsible) {
+    return `
+      <section class="group-cluster group-cluster--${tone} group-cluster--${variant}${useCompactLayout ? ' group-cluster--compact' : ''} group-cluster--static">
+        <div class="group-cluster__summary group-cluster__summary--static">
+          ${headerHtml}
+        </div>
+        <div class="group-cluster__body group-cluster__body--static">
+          <div class="group-cluster__fields">
+            ${renderFieldList(collection.fields, {
+      compact: useCompactLayout,
+      pathPrefix: collection.pathLabel || ''
+    })}
+          </div>
+        </div>
+      </section>
+    `;
+  }
 
   return `
     <details
@@ -1000,41 +1061,7 @@ function renderNestedCollection(collection, tone = 'codex', variant = 'nested', 
       ${isOpen ? 'open' : ''}
     >
       <summary class="group-cluster__summary">
-        <div class="group-cluster__header">
-          <div class="group-cluster__copy">
-            <div class="group-cluster__eyebrow-row">
-              <p class="group-cluster__eyebrow">${escapeHtml(collection.eyebrow)}</p>
-              <span class="group-cluster__tag">${escapeHtml(variantLabel)}</span>
-            </div>
-            <h4>${escapeHtml(collection.title)}</h4>
-            ${useCompactLayout ? `
-              <div class="group-cluster__support">
-                ${collection.pathLabel ? `
-                  <div class="group-cluster__support-row">
-                    <span class="group-cluster__support-label">前缀</span>
-                    <code class="group-cluster__path group-cluster__path--inline" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
-                  </div>
-                ` : ''}
-                ${renderCollectionSummaryPills(collectionSummary)}
-              </div>
-            ` : `
-              <p class="group-cluster__hint">${escapeHtml(collection.hint)}</p>
-              ${renderPreviewChips(previewLabels, 3)}
-            `}
-          </div>
-          <div class="group-cluster__meta">
-            ${!useCompactLayout && collection.pathLabel ? `
-              <div class="group-cluster__meta-panel">
-                <span class="group-cluster__meta-label">字段前缀</span>
-                <code class="group-cluster__path" title="${escapeHtml(collection.pathLabel)}">${escapeHtml(collection.pathLabel)}</code>
-              </div>
-            ` : ''}
-            <div class="group-cluster__meta-row">
-              <span class="group-cluster__count">${collection.fields.length} 项</span>
-              <span class="group-cluster__chevron" aria-hidden="true">⌄</span>
-            </div>
-          </div>
-        </div>
+        ${headerHtml}
       </summary>
       <div class="group-cluster__body">
         <div class="group-cluster__fields">
@@ -1048,13 +1075,63 @@ function renderNestedCollection(collection, tone = 'codex', variant = 'nested', 
   `;
 }
 
+function renderFocusedSchemaGroup(group, tone = 'codex') {
+  const stats = summarizeGroup(group);
+  const layout = createGroupFieldLayout(group);
+  const hint = layout.shouldNest
+    ? `当前直接进入 ${layout.nestedCollectionLabel} 明细，减少一层展开层级。`
+    : '当前直接进入这个分类本身，可以连续编辑，不再额外套一层分组折叠。';
+
+  return `
+    <section class="group-card group-card--${tone} group-card--flat ${group.key === '__root__' ? 'group-card--root' : ''}">
+      <div class="group-card__header group-card__header--flat">
+        <div class="group-card__header-copy">
+          <p class="group-card__eyebrow">${escapeHtml(layout.shouldNest ? layout.nestedCollectionLabel : '当前分类')}</p>
+          <h3>${escapeHtml(group.title)}</h3>
+          <p class="group-card__hint">${escapeHtml(hint)}</p>
+        </div>
+        <span class="group-card__meta">
+          ${layout.shouldNest ? `<span class="group-card__cluster-count">${layout.nestedGroups.length + (layout.directFields.length > 0 ? 1 : 0)} 块</span>` : ''}
+          <span class="group-card__count">${stats.totalCount} 项</span>
+        </span>
+      </div>
+      <div class="group-card__body">
+        ${layout.shouldNest ? `
+          ${layout.directFields.length > 0 ? renderNestedCollection({
+    eyebrow: '直接字段',
+    title: '基础项',
+    hint: '挂在当前分类下，保持展开便于连续编辑。',
+    pathLabel: group.key === '__root__' ? '' : group.key,
+    fields: layout.directFields
+  }, tone, 'direct', true, '', { collapsible: false }) : ''}
+          <div class="group-card__clusters">
+            ${layout.nestedGroups.map((nestedGroup) => renderNestedCollection({
+    ...nestedGroup,
+    eyebrow: layout.nestedCollectionLabel
+  }, tone, 'nested', true, '', { collapsible: false })).join('')}
+          </div>
+        ` : `
+          <div class="group-card__fields">
+            ${renderFieldList(group.fields, {
+    pathPrefix: group.key === '__root__' ? '' : group.key
+  })}
+          </div>
+        `}
+      </div>
+    </section>
+  `;
+}
+
 function renderSchemaGroup(group, tone, position, isOpen, openClusterKeySet = new Set()) {
   const stats = summarizeGroup(group);
   const layout = createGroupFieldLayout(group);
   const anchorId = createGroupAnchorId(group.key, position);
   const previewLabels = buildGroupPreviewLabels(group, layout);
+  const useDenseLayout = !layout.shouldNest && shouldUseDenseFieldLayout(group.fields);
   const hint = layout.shouldNest
     ? `已按 ${layout.nestedCollectionLabel} 分块；同层默认单开，一次只看一块更清楚。`
+    : useDenseLayout
+      ? '当前按双列展开，优先减少纵向滚动。'
     : stats.officialCount > 0
       ? `${stats.officialCount} 项带官方说明。`
       : stats.structuredCount > 0
@@ -1064,7 +1141,7 @@ function renderSchemaGroup(group, tone, position, isOpen, openClusterKeySet = ne
 
   return `
     <details
-      class="group-card group-card--${tone} ${layout.shouldNest ? 'group-card--clustered' : ''}"
+      class="group-card group-card--${tone} ${layout.shouldNest ? 'group-card--clustered' : ''} ${group.key === '__root__' ? 'group-card--root' : ''}"
       id="${anchorId}"
       data-group-key="${escapeHtml(group.key)}"
       ${isOpen ? 'open' : ''}
@@ -1381,26 +1458,12 @@ function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = ''
     field.type === 'array' || field.type === 'object' ? 'structured' : 'official'
   ));
 
-  if (tone === 'danger') {
-    badges.push(renderFieldBadge('高风险', 'danger'));
-  } else if (tone === 'safety') {
-    badges.push(renderFieldBadge('安全', 'safety'));
-  } else if (tone === 'network') {
-    badges.push(renderFieldBadge('联网', 'network'));
-  } else if (tone === 'automation') {
-    badges.push(renderFieldBadge('自动化', 'automation'));
-  } else if (tone === 'runtime') {
-    badges.push(renderFieldBadge('环境', 'runtime'));
-  } else if (tone === 'core') {
-    badges.push(renderFieldBadge('核心', 'core'));
-  }
-
   if (!field.isOfficial) {
     badges.push(renderFieldBadge('自定义', 'custom'));
   }
 
   const pathLabel = getRelativeFieldPath(field.actualPath, pathPrefix);
-  const shouldRenderPath = Boolean(pathLabel) && !(compact && shouldHideCompactFieldPath(pathLabel, field.title));
+  const shouldRenderPath = Boolean(pathLabel) && !shouldHideCompactFieldPath(pathLabel, field.title);
   const pathChip = shouldRenderPath
     ? `<code class="field-path-chip" title="${escapeHtml(field.actualPath)}">${escapeHtml(pathLabel)}</code>`
     : '';
@@ -1417,8 +1480,8 @@ function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = ''
     : (pathChip || showNote
         ? `
           <span class="field-meta-stack">
-            ${pathChip ? `<span class="field-detail-line field-detail-line--path"><span class="field-detail-label">路径</span>${pathChip}</span>` : ''}
-            ${showNote ? `<span class="field-note-line field-note-line--${tone}"><span class="field-detail-label">提醒</span><span class="field-note-text">${escapeHtml(noteCopy)}</span></span>` : ''}
+            ${pathChip ? `<span class="field-detail-line field-detail-line--path">${pathChip}</span>` : ''}
+            ${showNote ? `<span class="field-note-line field-note-line--${tone}">${escapeHtml(noteCopy)}</span>` : ''}
           </span>
         `
         : '');
@@ -1433,6 +1496,17 @@ function getFieldMetaPresentation(field = {}, { compact = false, pathPrefix = ''
 
 function isStructuredField(field = {}) {
   return field.type === 'array' || field.type === 'object';
+}
+
+function shouldUseDenseFieldLayout(fields = [], { compact = false } = {}) {
+  if (compact || !Array.isArray(fields) || fields.length < 5) {
+    return false;
+  }
+
+  const structuredCount = fields.filter(({ field }) => isStructuredField(field)).length;
+  const primitiveCount = fields.length - structuredCount;
+
+  return primitiveCount >= 4 || (fields.length >= 6 && structuredCount <= 2);
 }
 
 function shouldUseCompactCollectionLayout(collection = {}) {
@@ -1458,8 +1532,10 @@ function renderFieldList(fields = [], { compact = false, pathPrefix = '' } = {})
     return '';
   }
 
+  const useDenseLayout = shouldUseDenseFieldLayout(fields, { compact });
+
   return `
-    <div class="schema-field-list ${compact ? 'schema-field-list--compact' : ''}">
+    <div class="schema-field-list ${compact ? 'schema-field-list--compact' : ''} ${useDenseLayout ? 'schema-field-list--dense' : ''}">
       ${fields.map(({ field, index }) => renderField(field, index, { compact, pathPrefix })).join('')}
     </div>
   `;
@@ -1631,6 +1707,12 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
   const baseGroups = searchQuery ? groups : filterGroupsByTab(groups, activeTab);
   const filteredView = filterGroups(baseGroups, searchQuery);
   const visibleGroups = filteredView.groups;
+  const shouldRenderCategoryBanner = !searchQuery
+    && activeTab !== 'quick'
+    && !(activeTab !== 'all' && visibleGroups.length === 1);
+  const isFocusedGroupTab = !searchQuery
+    && activeTab.startsWith('group:')
+    && visibleGroups.length === 1;
   const quickSuggestionFields = (currentDraft.starterSuggestions || [])
     .filter((field) => !quickFieldItems.some((item) => item.field.actualPath === field.actualPath))
     .slice(0, 6);
@@ -1657,6 +1739,14 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
   const initialActiveGroupKey = visibleGroups.some((group) => group.key === storedUiState?.activeGroupKey)
     ? storedUiState.activeGroupKey
     : (visibleGroups[0]?.key || '');
+  const outlineHtml = (searchQuery || activeTab === 'all')
+    ? renderGroupOutline({
+      visibleGroups,
+      activeGroupKey: initialActiveGroupKey,
+      tone,
+      searchQuery
+    })
+    : '';
 
   container.innerHTML = `
     <div class="panel-shell panel-shell--editor-v2">
@@ -1685,43 +1775,37 @@ export function renderSchemaDrivenEditor(container, { entry, draft, onDraftChang
       totalFieldCount: filteredView.totalFieldCount,
       tone
     })
-    : renderCategoryBanner({ activeTab, tabs, visibleGroups, tone })}
+    : (shouldRenderCategoryBanner ? renderCategoryBanner({ activeTab, tabs, visibleGroups, tone }) : '')}
 
-        ${searchQuery || activeTab !== 'quick'
-    ? renderGroupOutline({
-      visibleGroups,
-      activeGroupKey: initialActiveGroupKey,
+        ${renderSchemaStage({
+    outlineHtml,
+    contentHtml: !searchQuery && activeTab === 'quick' ? renderSchemaQuickPanel({
+      quickSections,
+      suggestionFields: quickSuggestionFields,
+      groups,
+      tone
+    }) : isFocusedGroupTab ? renderFocusedSchemaGroup(visibleGroups[0], tone) : visibleGroups.length > 0 ? `
+            <div class="field-grid-v2">
+              ${visibleGroups.map((group, position) => renderSchemaGroup(
+      group,
       tone,
-      searchQuery
-    })
-    : ''}
-
-        ${!searchQuery && activeTab === 'quick' ? renderSchemaQuickPanel({
-    quickSections,
-    suggestionFields: quickSuggestionFields,
-    groups,
-    tone
-  }) : visibleGroups.length > 0 ? `
-          <div class="field-grid-v2">
-            ${visibleGroups.map((group, position) => renderSchemaGroup(
-    group,
-    tone,
-    position,
-    openGroupKeySet.has(group.key),
-    openClusterKeySet
-  )).join('')}
-          </div>
-        ` : `
-          <div class="editor-empty-state">
-            ${searchQuery ? `
-              <p class="empty-state-title">没有命中当前筛选条件</p>
-              <p class="empty-state-description">可以换一个关键字，或清空筛选后继续浏览当前字段。</p>
-            ` : `
-              <p class="empty-state-title">这一类里还没有字段</p>
-              <p class="empty-state-description">可以先新建字段，或者切到别的分类继续查看。</p>
-            `}
-          </div>
-        `}
+      position,
+      openGroupKeySet.has(group.key),
+      openClusterKeySet
+    )).join('')}
+            </div>
+          ` : `
+            <div class="editor-empty-state">
+              ${searchQuery ? `
+                <p class="empty-state-title">没有命中当前筛选条件</p>
+                <p class="empty-state-description">可以换一个关键字，或清空筛选后继续浏览当前字段。</p>
+              ` : `
+                <p class="empty-state-title">这一类里还没有字段</p>
+                <p class="empty-state-description">可以先新建字段，或者切到别的分类继续查看。</p>
+              `}
+            </div>
+          `
+  })}
       </main>
 
       ${renderEditorFooter({

@@ -359,22 +359,29 @@ export function renderSelect({
     descriptionId,
     fieldAttributes,
     control: `
-      <select${renderAttributes(mergedControlAttributes)}>
-        ${normalizedOptions
-          .map((option) => {
-            const optionValue = option.value ?? '';
-            return `
-              <option${renderAttributes({
-                value: optionValue,
-                selected: String(optionValue) === String(value),
-                disabled: option.disabled
-              })}>
-                ${escapeHtml(option.label ?? optionValue)}
-              </option>
-            `;
-          })
-          .join('')}
-      </select>
+      <span class="select-shell">
+        <select${renderAttributes(mergedControlAttributes)}>
+          ${normalizedOptions
+            .map((option) => {
+              const optionValue = option.value ?? '';
+              return `
+                <option${renderAttributes({
+                  value: optionValue,
+                  selected: String(optionValue) === String(value),
+                  disabled: option.disabled
+                })}>
+                  ${escapeHtml(option.label ?? optionValue)}
+                </option>
+              `;
+            })
+            .join('')}
+        </select>
+        <span class="select-shell__icon" aria-hidden="true">
+          <svg viewBox="0 0 12 12" focusable="false" aria-hidden="true">
+            <path d="M2.5 4.25L6 7.75L9.5 4.25" />
+          </svg>
+        </span>
+      </span>
     `
   });
 }
