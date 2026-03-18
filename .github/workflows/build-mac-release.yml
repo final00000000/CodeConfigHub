@@ -21,12 +21,12 @@ jobs:
 
     steps:
       - name: Checkout tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           ref: ${{ inputs.tag }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 20
           cache: npm
@@ -40,7 +40,7 @@ jobs:
         run: npx electron-builder --mac dmg zip --universal --publish never --config.directories.output=dist-mac
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mac-release-${{ inputs.tag }}
           if-no-files-found: error
