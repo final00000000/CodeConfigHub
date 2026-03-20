@@ -253,6 +253,23 @@ export function renderTextInput({
       ${datalistOptions.map((option) => `<option${renderAttributes({ value: option.value, label: option.label })}></option>`).join('')}
     </datalist>
   ` : '';
+  const inputControlHtml = `<input${renderAttributes(mergedControlAttributes)} />`;
+  const controlHtml = listId
+    ? `
+      <span class="select-shell select-shell--combobox">
+        ${inputControlHtml}
+        <span class="select-shell__icon" aria-hidden="true">
+          <svg viewBox="0 0 12 12" focusable="false" aria-hidden="true">
+            <path d="M2.5 4.25L6 7.75L9.5 4.25" />
+          </svg>
+        </span>
+      </span>
+      ${datalistHtml}
+    `
+    : `
+      ${inputControlHtml}
+      ${datalistHtml}
+    `;
 
   return renderFieldShell({
     label,
@@ -263,10 +280,7 @@ export function renderTextInput({
     labelId,
     descriptionId,
     fieldAttributes,
-    control: `
-      <input${renderAttributes(mergedControlAttributes)} />
-      ${datalistHtml}
-    `
+    control: controlHtml
   });
 }
 

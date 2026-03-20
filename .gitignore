@@ -9,6 +9,10 @@ dist/
 .claude/
 .gemini/
 .trellis/
+# Keep shareable project metadata visible; ignore only local/runtime artifacts.
+.serena/cache/
+.serena/project.local.yml
+.superpowers/**/.server*
 *-check.png
 changed_files.txt
 commit_msg.txt

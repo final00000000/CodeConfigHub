@@ -14,33 +14,166 @@ function humanizeKey(value = '') {
     .replace(/\b\w/g, (match) => match.toUpperCase());
 }
 
-function resolveSchemaVariant(schema) {
+function mergeSchemaNodes(baseNode, overrideNode) {
+  const base = isPlainObject(baseNode) ? baseNode : {};
+  const override = isPlainObject(overrideNode) ? overrideNode : {};
+
+  const merged = {
+    ...base,
+    ...override
+  };
+
+  if (isPlainObject(base.properties) || isPlainObject(override.properties)) {
+    merged.properties = {
+      ...(isPlainObject(base.properties) ? base.properties : {}),
+      ...(isPlainObject(override.properties) ? override.properties : {})
+    };
+  }
+
+  if (isPlainObject(base.patternProperties) || isPlainObject(override.patternProperties)) {
+    merged.patternProperties = {
+      ...(isPlainObject(base.patternProperties) ? base.patternProperties : {}),
+      ...(isPlainObject(override.patternProperties) ? override.patternProperties : {})
+    };
+  }
+
+  if (Array.isArray(base.required) || Array.isArray(override.required)) {
+    merged.required = [...new Set([...(Array.isArray(base.required) ? base.required : []), ...(Array.isArray(override.required) ? override.required : [])])];
+  }
+
+  if (base.additionalProperties && override.additionalProperties) {
+    if (isPlainObject(base.additionalProperties) && isPlainObject(override.additionalProperties)) {
+      merged.additionalProperties = mergeSchemaNodes(base.additionalProperties, override.additionalProperties);
+    } else {
+      merged.additionalProperties = override.additionalProperties;
+    }
+  }
+
+  if (base.items && override.items) {
+    if (isPlainObject(base.items) && isPlainObject(override.items)) {
+      merged.items = mergeSchemaNodes(base.items, override.items);
+    } else {
+      merged.items = override.items;
+    }
+  }
+
+  return merged;
+}
+
+function resolveSchemaPointer(rootSchema, ref = '') {
+  if (typeof ref !== 'string' || !ref.startsWith('#/')) {
+    return null;
+  }
+
+  const segments = ref
+    .slice(2)
+    .split('/')
+    .map((segment) => segment.replace(/~1/g, '/').replace(/~0/g, '~'));
+
+  let cursor = rootSchema;
+  for (const segment of segments) {
+    if (!cursor || typeof cursor !== 'object') {
+      return null;
+    }
+    cursor = cursor[segment];
+  }
+
+  return cursor ?? null;
+}
+
+function normalizeSuggestionValues(values = []) {
+  const normalized = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+
+    if (typeof value === 'object') {
+      continue;
+    }
+
+    const normalizedValue = String(value).trim();
+    if (!normalizedValue || seen.has(normalizedValue)) {
+      continue;
+    }
+
+    seen.add(normalizedValue);
+    normalized.push(normalizedValue);
+  }
+
+  return normalized;
+}
+
+function extractSchemaEnumValues(node = {}) {
+  return normalizeSuggestionValues([
+    ...(Array.isArray(node?.enum) ? node.enum : []),
+    ...(('const' in node) ? [node.const] : [])
+  ]);
+}
+
+function extractSchemaSuggestedValues(node = {}) {
+  return normalizeSuggestionValues([
+    ...extractSchemaEnumValues(node),
+    ...(Array.isArray(node?.examples) ? node.examples : []),
+    ...((node?.default !== undefined) ? [node.default] : [])
+  ]);
+}
+
+function mergeSuggestionValues(...valueLists) {
+  return normalizeSuggestionValues(valueLists.flatMap((values) => (Array.isArray(values) ? values : [])));
+}
+
+function resolveSchemaVariant(schema, rootSchema = schema, seenRefs = new Set()) {
   if (!schema || typeof schema !== 'object') {
     return {};
   }
 
-  const variants = [];
-  if (Array.isArray(schema.oneOf)) {
-    variants.push(...schema.oneOf);
+  let node = schema;
+
+  if (typeof node.$ref === 'string' && !seenRefs.has(node.$ref)) {
+    const resolvedRef = resolveSchemaPointer(rootSchema, node.$ref);
+    if (resolvedRef) {
+      const nextSeenRefs = new Set(seenRefs);
+      nextSeenRefs.add(node.$ref);
+      node = mergeSchemaNodes(resolveSchemaVariant(resolvedRef, rootSchema, nextSeenRefs), {
+        ...node,
+        $ref: undefined
+      });
+    }
   }
-  if (Array.isArray(schema.anyOf)) {
-    variants.push(...schema.anyOf);
+
+  if (Array.isArray(node.allOf) && node.allOf.length > 0) {
+    node = node.allOf.reduce((acc, entry) => mergeSchemaNodes(acc, resolveSchemaVariant(entry, rootSchema, seenRefs)), {
+      ...node,
+      allOf: undefined
+    });
+  }
+
+  const variants = [];
+  if (Array.isArray(node.oneOf)) {
+    variants.push(...node.oneOf);
+  }
+  if (Array.isArray(node.anyOf)) {
+    variants.push(...node.anyOf);
   }
 
   if (variants.length === 0) {
-    return schema;
+    return node;
   }
 
-  const preferred = variants.find((entry) => {
+  const resolvedVariants = variants.map((entry) => resolveSchemaVariant(entry, rootSchema, seenRefs));
+  const preferred = resolvedVariants.find((entry) => {
     const type = Array.isArray(entry?.type) ? entry.type : [entry?.type].filter(Boolean);
     return entry?.properties || entry?.additionalProperties || entry?.patternProperties || (type.length > 0 && !type.includes('null'));
   });
 
-  return preferred || variants[0] || schema;
+  return preferred || resolvedVariants[0] || node;
 }
 
 function getSchemaLeafType(schema) {
-  const node = resolveSchemaVariant(schema);
+  const node = resolveSchemaVariant(schema, schema);
   const typeList = Array.isArray(node?.type) ? node.type.filter((item) => item !== 'null') : [node?.type].filter(Boolean);
 
   if (typeList.includes('object') || node?.properties || node?.additionalProperties || node?.patternProperties) {
@@ -66,14 +199,14 @@ function getSchemaLeafType(schema) {
   return 'string';
 }
 
-function flattenSchema(schema, pathParts = [], acc = []) {
-  const node = resolveSchemaVariant(schema);
+function flattenSchema(schema, pathParts = [], acc = [], rootSchema = schema) {
+  const node = resolveSchemaVariant(schema, rootSchema);
   const schemaType = getSchemaLeafType(node);
   const description = node?.description || node?.markdownDescription || '';
 
   if (schemaType === 'object') {
     for (const [key, child] of Object.entries(node?.properties || {})) {
-      flattenSchema(child, [...pathParts, key], acc);
+      flattenSchema(child, [...pathParts, key], acc, rootSchema);
     }
 
     const wildcardSources = [];
@@ -85,7 +218,7 @@ function flattenSchema(schema, pathParts = [], acc = []) {
     }
 
     for (const childSchema of wildcardSources) {
-      flattenSchema(childSchema, [...pathParts, '*'], acc);
+      flattenSchema(childSchema, [...pathParts, '*'], acc, rootSchema);
     }
 
     return acc;
@@ -101,7 +234,8 @@ function flattenSchema(schema, pathParts = [], acc = []) {
     type: schemaType,
     title: node?.title || humanizeKey(pathParts[pathParts.length - 1]),
     description,
-    enumValues: Array.isArray(node?.enum) ? [...node.enum] : [],
+    enumValues: extractSchemaEnumValues(node),
+    suggestedValues: extractSchemaSuggestedValues(node),
     defaultValue: node?.default
   });
 
@@ -153,6 +287,15 @@ function findMatchingSchemaEntry(actualParts, schemaEntries = []) {
     });
 
   return matches[0] || null;
+}
+
+export function findMatchingSchemaEntryByPath(path = '', schemaEntries = []) {
+  const pathParts = normalizeFieldPathParts(path);
+  if (pathParts.length === 0) {
+    return null;
+  }
+
+  return findMatchingSchemaEntry(pathParts, schemaEntries);
 }
 
 function toInputValue(value, type) {
@@ -237,6 +380,7 @@ function createFieldFromLeaf(leaf, schemaEntry = null) {
     schemaType,
     isTypeConflict,
     enumValues: isTypeConflict ? [] : (schemaEntry?.enumValues || []),
+    suggestedValues: isTypeConflict ? [] : (Array.isArray(schemaEntry?.suggestedValues) ? [...schemaEntry.suggestedValues] : []),
     defaultValue: isTypeConflict ? undefined : schemaEntry?.defaultValue,
     inputValue: toInputValue(leaf.value, type),
     isOfficial: Boolean(schemaEntry),
@@ -330,6 +474,7 @@ function createFieldFromSchemaEntry(schemaEntry, overrides = {}) {
     schemaType: schemaEntry?.type || type,
     isTypeConflict: false,
     enumValues: Array.isArray(schemaEntry?.enumValues) ? [...schemaEntry.enumValues] : [],
+    suggestedValues: Array.isArray(schemaEntry?.suggestedValues) ? [...schemaEntry.suggestedValues] : [],
     defaultValue: schemaEntry?.defaultValue,
     inputValue: overrides.inputValue ?? getDefaultInputValue(schemaEntry?.defaultValue, type),
     isOfficial: Boolean(schemaEntry),
@@ -362,6 +507,7 @@ export function createSchemaDraftField({ path = '', type = 'string', schemaEntry
     schemaType: '',
     isTypeConflict: false,
     enumValues: [],
+    suggestedValues: [],
     defaultValue: undefined,
     inputValue: inputValue ?? getDefaultInputValue(undefined, type),
     isOfficial: false,
@@ -371,7 +517,13 @@ export function createSchemaDraftField({ path = '', type = 'string', schemaEntry
 
 export function createSchemaDrivenDraft(parsed = {}, officialSchemaState = null) {
   const localLeaves = flattenConfigLeaves(parsed).sort((left, right) => left.path.localeCompare(right.path, 'en'));
-  const schemaEntries = officialSchemaState?.schema ? flattenSchema(officialSchemaState.schema) : [];
+  const officialFieldSuggestions = isPlainObject(officialSchemaState?.fieldSuggestions) ? officialSchemaState.fieldSuggestions : {};
+  const schemaEntries = officialSchemaState?.schema
+    ? flattenSchema(officialSchemaState.schema).map((entry) => ({
+      ...entry,
+      suggestedValues: mergeSuggestionValues(entry.suggestedValues, officialFieldSuggestions[entry.path])
+    }))
+    : [];
   const schemaFields = [];
   const customFields = [];
 
@@ -417,6 +569,12 @@ export function createSchemaDrivenDraft(parsed = {}, officialSchemaState = null)
       docs: officialSchemaState?.docs || []
     },
     customFields,
+    schemaCatalog: schemaEntries.map((entry) => ({
+      ...entry,
+      pathParts: Array.isArray(entry.pathParts) ? [...entry.pathParts] : [],
+      enumValues: Array.isArray(entry.enumValues) ? [...entry.enumValues] : [],
+      suggestedValues: Array.isArray(entry.suggestedValues) ? [...entry.suggestedValues] : []
+    })),
     availableSchemaFields,
     starterSuggestions,
     manualFieldPath: '',
@@ -709,5 +867,107 @@ export function formatSchemaFetchedAt(value) {
 }
 
 export function humanizeSchemaGroup(groupKey) {
-  return groupKey === '__root__' ? '基础字段' : humanizeKey(groupKey);
+  const normalized = String(groupKey || '').trim();
+
+  if (normalized === '__root__') {
+    return '全局默认';
+  }
+
+  if (normalized === 'model_providers') {
+    return '模型提供方';
+  }
+
+  if (normalized === 'mcp_servers') {
+    return 'MCP 服务';
+  }
+
+  if (normalized === 'profiles') {
+    return '配置档案';
+  }
+
+  if (normalized === 'agents') {
+    return 'Agent 角色';
+  }
+
+  if (normalized === 'permissions') {
+    return '权限规则';
+  }
+
+  if (normalized === 'default_permissions') {
+    return '默认权限';
+  }
+
+  if (normalized === 'features') {
+    return '功能开关';
+  }
+
+  if (normalized === 'tools') {
+    return '工具能力';
+  }
+
+  if (normalized === 'apps') {
+    return 'App 集成';
+  }
+
+  if (normalized === 'skills') {
+    return 'Skills';
+  }
+
+  if (normalized === 'memories') {
+    return '记忆设置';
+  }
+
+  if (normalized === 'realtime') {
+    return '实时能力';
+  }
+
+  if (normalized === 'audio') {
+    return '音频设置';
+  }
+
+  if (normalized === 'projects') {
+    return '项目配置';
+  }
+
+  if (normalized === 'analytics') {
+    return '分析统计';
+  }
+
+  if (normalized === 'otel') {
+    return '遥测 OTel';
+  }
+
+  if (normalized === 'feedback') {
+    return '反馈控制';
+  }
+
+  if (normalized === 'notice') {
+    return '提示展示';
+  }
+
+  if (normalized === 'notify') {
+    return '通知策略';
+  }
+
+  if (normalized === 'history') {
+    return '历史持久化';
+  }
+
+  if (normalized === 'tui') {
+    return '终端界面';
+  }
+
+  if (normalized === 'windows') {
+    return 'Windows 兼容';
+  }
+
+  if (normalized === 'env') {
+    return '环境变量';
+  }
+
+  if (normalized === 'hooks') {
+    return '自动化 Hook';
+  }
+
+  return humanizeKey(normalized);
 }
